@@ -54,6 +54,10 @@ pub struct Theme {
     /// Headings use the semibold face.
     pub bold_headings: bool,
     pub high_contrast: bool,
+    /// DPI scale of the surface (1.0 = 96 dpi). `Ui` lays out and paints in logical pixels and
+    /// multiplies spacing, sizes and fonts by this when drawing; the host passes pointer input
+    /// and the area in logical pixels too.
+    pub dpi_scale: f32,
 }
 
 impl Default for Theme {
@@ -105,7 +109,18 @@ impl Theme {
             text_scale: 1.0,
             bold_headings: false,
             high_contrast: false,
+            dpi_scale: 1.0,
         }
+    }
+
+    /// The same theme for a surface at `scale` (1.0 = 96 dpi, 1.5 = 144 dpi).
+    pub fn with_dpi(mut self, scale: f32) -> Theme {
+        self.dpi_scale = if scale.is_finite() {
+            scale.clamp(0.5, 8.0)
+        } else {
+            1.0
+        };
+        self
     }
 
     /// The theme for `settings` (C# `UI.ApplyControlTheme` plus the accessibility preferences):
@@ -286,6 +301,14 @@ mod tests {
             ..Settings::default()
         });
         assert_eq!(big.text_scale, 1.5);
+    }
+
+    #[test]
+    fn dpi_scale_defaults_to_one_and_clamps() {
+        assert_eq!(Theme::default().dpi_scale, 1.0);
+        assert_eq!(Theme::default().with_dpi(1.5).dpi_scale, 1.5);
+        assert_eq!(Theme::default().with_dpi(f32::NAN).dpi_scale, 1.0);
+        assert_eq!(Theme::default().with_dpi(99.0).dpi_scale, 8.0);
     }
 
     #[test]

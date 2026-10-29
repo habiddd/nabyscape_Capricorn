@@ -686,6 +686,18 @@ impl Canvas {
         style: &TextStyle,
         max_width: Option<f32>,
     ) -> f32 {
+        let k = self.scale();
+        if k != 1.0 {
+            let scaled = TextStyle {
+                size: style.size * k,
+                ..*style
+            };
+            let (px, py) = (x * k, y * k);
+            self.set_scale(1.0);
+            let w = self.text(fonts, px, py, text, &scaled, max_width.map(|m| m * k));
+            self.set_scale(k);
+            return w / k;
+        }
         let shown: Cow<str> = match max_width {
             Some(w) => fonts.ellipsize(text, style, w),
             None => Cow::Borrowed(text),

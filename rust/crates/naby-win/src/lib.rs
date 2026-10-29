@@ -19,6 +19,7 @@ pub mod monitors;
 pub mod office_text;
 pub mod outside_click;
 pub mod overlay_host;
+pub mod settings_host;
 pub mod shell;
 pub mod startup;
 pub mod text_clipboard;

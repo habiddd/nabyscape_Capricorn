@@ -10,6 +10,13 @@ pub const WM_APP_WAKE: u32 = 0x8001;
 /// `WM_APP + 2`: tray icon callback.
 pub const WM_APP_TRAY: u32 = 0x8002;
 
+/// The auxiliary top-level windows (not the dock).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuxWindow {
+    Settings,
+    Welcome,
+}
+
 /// Extended additively by later host services.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostEvent {
@@ -46,4 +53,8 @@ pub enum HostEvent {
         x: i32,
         y: i32,
     },
+    /// An auxiliary window has input, a timer tick, a resize or a DPI change to handle.
+    AuxInput(AuxWindow),
+    /// An auxiliary window was destroyed.
+    AuxClosed(AuxWindow),
 }
