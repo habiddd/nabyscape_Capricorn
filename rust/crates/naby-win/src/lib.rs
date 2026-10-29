@@ -16,6 +16,7 @@ pub mod monitors;
 pub mod placeholder;
 pub mod shell;
 pub mod startup;
+pub mod text_clipboard;
 pub mod timer;
 pub mod tray;
 pub mod util;
@@ -41,3 +42,13 @@ pub mod mixer;
 #[cfg(windows)]
 pub mod sounds;
 pub mod tone;
+
+// System, clipboard history, downloads, launcher, drag-drop and capture services.
+pub mod battery;
+pub mod capture;
+pub mod downloads;
+pub mod dragdrop;
+pub mod launcher;
+#[cfg(windows)]
+pub mod svc_util;
+pub mod system;
