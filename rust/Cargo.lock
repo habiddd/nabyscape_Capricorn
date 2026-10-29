@@ -513,6 +513,7 @@ dependencies = [
  "serde_json",
  "ureq",
  "windows",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

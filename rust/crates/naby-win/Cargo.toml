@@ -20,6 +20,7 @@ chrono.workspace = true
 ureq.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+windows-core = "0.61"
 windows = { version = "0.61", features = [
   "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging",
   "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common",
@@ -34,5 +35,5 @@ windows = { version = "0.61", features = [
   "Win32_Devices_FunctionDiscovery", "Win32_Devices_Display", "Win32_UI_Shell_PropertiesSystem",
   "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11",
   "Foundation", "Foundation_Collections", "Media_Control", "Storage_Streams", "Media_SpeechRecognition",
-  "Media_SpeechSynthesis", "Globalization",
+  "Media_SpeechSynthesis", "Globalization", "ApplicationModel", "Win32_System_Rpc",
 ] }
