@@ -11,6 +11,7 @@ use super::notes::{bound, MAX_NOTE};
 use super::shelf::{canonical_path, ShelfItem};
 use super::tasks::TaskItem;
 use super::{list_skip_null, new_id, null_default, shelf, tasks};
+use crate::store::Store;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -19,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 /// Store document name of `ProductivityData`.
@@ -108,6 +110,23 @@ impl ProductivityService {
         };
         service.normalize();
         service.purge_orphan_images();
+        service
+    }
+
+    /// Loads the `productivity` document from `store` and persists every change back to it.
+    /// An unreadable document starts empty; the store then refuses to overwrite it until a later
+    /// load succeeds, so the failure shows up as `last_error` on the first save.
+    pub fn open(store: &Arc<Store>) -> Self {
+        let data = store
+            .load::<ProductivityData>(DOCUMENT_NAME)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let mut service = Self::new(store.dir(), data);
+        let target = Arc::clone(store);
+        service.set_saver(Box::new(move |data| {
+            target.save(DOCUMENT_NAME, data).map_err(|e| e.to_string())
+        }));
         service
     }
 

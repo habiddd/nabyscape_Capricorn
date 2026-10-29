@@ -3,7 +3,11 @@
 //! capture or model downloads.
 
 use super::Settings;
+use crate::store::{Store, StoreError};
 use serde::{Deserialize, Serialize};
+
+/// Name of the welcome document.
+pub const DOCUMENT_NAME: &str = "welcome";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
@@ -101,4 +105,32 @@ pub fn apply_with(settings: &mut Settings, preset: WelcomePreset, dock_edge: Opt
         settings.dock_edge = edge.to_string();
     }
     settings.normalize();
+}
+
+/// C# `WelcomeSetup.ShouldOffer(store, existingProfile)`: a brand-new profile is marked pending
+/// (saved) and offered setup; unfinished setup resumes; completed setup and existing profiles are
+/// left alone.
+pub fn should_offer_stored(store: &Store, existing_profile: bool) -> bool {
+    let state_file_exists = store.dir().join(format!("{DOCUMENT_NAME}.json")).exists();
+    let state = store
+        .load::<WelcomeState>(DOCUMENT_NAME)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let offer = should_offer(&state, state_file_exists, existing_profile);
+    if offer.save_pending {
+        let _ = store.save(
+            DOCUMENT_NAME,
+            &WelcomeState {
+                pending: true,
+                completed: false,
+            },
+        );
+    }
+    offer.show
+}
+
+/// C# `WelcomeSetup.Complete`.
+pub fn complete(store: &Store) -> Result<(), StoreError> {
+    store.save(DOCUMENT_NAME, &completed_state())
 }

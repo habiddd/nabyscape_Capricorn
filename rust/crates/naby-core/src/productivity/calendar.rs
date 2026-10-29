@@ -84,6 +84,23 @@ fn create(
     })
 }
 
+impl crate::store::Store {
+    /// Loads the `calendar` document (a JSON array); missing or unreadable yields no events.
+    pub fn load_calendar(&self) -> Calendar {
+        let stored = self
+            .load::<Vec<Option<CalendarEvent>>>(DOCUMENT_NAME)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        Calendar::load(stored)
+    }
+
+    /// Saves the event list as the `calendar` document.
+    pub fn save_calendar(&self, events: &[CalendarEvent]) -> Result<(), crate::store::StoreError> {
+        self.save(DOCUMENT_NAME, &events.to_vec())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Calendar {
     events: Vec<CalendarEvent>,

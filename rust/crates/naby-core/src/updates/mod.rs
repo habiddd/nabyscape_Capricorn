@@ -191,6 +191,17 @@ pub struct UpdateState {
     pub last_attempt: DateTime<Utc>,
 }
 
+impl crate::store::Store {
+    /// The `update-state` document; missing or unreadable yields a never-attempted state.
+    pub fn load_update_state(&self) -> UpdateState {
+        self.load(DOCUMENT_NAME).ok().flatten().unwrap_or_default()
+    }
+
+    pub fn save_update_state(&self, state: &UpdateState) -> Result<(), crate::store::StoreError> {
+        self.save(DOCUMENT_NAME, state)
+    }
+}
+
 /// C# `OfficialUpdates.Check` gate: manual checks always run; automatic ones need the
 /// preference and 24 h since the last attempt.
 pub fn check_due(state: &UpdateState, manual: bool, enabled: bool, now: DateTime<Utc>) -> bool {

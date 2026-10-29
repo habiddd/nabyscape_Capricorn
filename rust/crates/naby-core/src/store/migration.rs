@@ -12,6 +12,7 @@ use serde_json::Value;
 use super::document::parse_payload;
 use super::Store;
 use crate::session::SessionState;
+use crate::settings::Settings;
 
 /// Extra structural check applied to `<document>.json` while a migration is staged.
 #[derive(Clone, Copy)]
@@ -28,7 +29,7 @@ fn built_in_validators() -> [MigrationValidator; 5] {
     [
         MigrationValidator {
             document: "settings",
-            check: |v| v.is_object(),
+            check: |v| v.is_object() && serde_json::from_value::<Settings>(v.clone()).is_ok(),
         },
         MigrationValidator {
             document: "productivity",
