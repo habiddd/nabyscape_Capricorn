@@ -3,6 +3,7 @@
 //! (`GetSystemTimes`, `GlobalMemoryStatusEx`, network/drive/process enumeration, WMI) are the
 //! Windows host's job; it fills a [`MonitorSnapshot`] and this module interprets it.
 
+pub mod battery;
 pub mod hardware;
 #[cfg(test)]
 mod tests;

@@ -12,6 +12,7 @@
 //! * [`snapshot`]: helpers to write test PNGs under `target/snapshots/`.
 
 pub mod canvas;
+pub mod contour;
 pub mod icons;
 pub mod image;
 pub mod snapshot;

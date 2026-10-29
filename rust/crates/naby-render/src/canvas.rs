@@ -336,20 +336,25 @@ impl Canvas {
     // ---- clipping ---------------------------------------------------------------------
 
     pub fn push_clip_round_rect(&mut self, r: Rect, radius: f32) {
+        self.push_clip_path(round_rect_path(r, radius).as_ref());
+    }
+
+    /// Clips to an arbitrary path (`None` clips everything away). Pair with [`Canvas::pop_clip`].
+    pub fn push_clip_path(&mut self, path: Option<&Path>) {
         let (w, h) = self.size();
         let mut mask = self
             .mask_pool
             .pop()
             .or_else(|| Mask::new(w, h))
             .expect("mask");
-        match round_rect_path(r, radius) {
+        match path {
             Some(path) => {
                 if let Some(prev) = self.clips.last() {
                     mask.data_mut().copy_from_slice(prev.data());
-                    mask.intersect_path(&path, FillRule::Winding, true, Transform::identity());
+                    mask.intersect_path(path, FillRule::Winding, true, Transform::identity());
                 } else {
                     mask.clear();
-                    mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+                    mask.fill_path(path, FillRule::Winding, true, Transform::identity());
                 }
             }
             None => mask.clear(),
