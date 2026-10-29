@@ -11,8 +11,11 @@ pub mod session;
 pub mod setup;
 pub mod style;
 pub mod transcript;
+pub mod voice;
 pub mod widget_tools;
 pub mod window;
+
+pub use voice::VoiceSettingsView;
 
 #[cfg(test)]
 mod tests;

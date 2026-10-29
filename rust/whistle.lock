@@ -1,0 +1,20 @@
+[
+  {
+    "name": "whistle.cact",
+    "arch": "any",
+    "url": "https://huggingface.co/Cactus-Compute/whistle/resolve/main/whistle.cact",
+    "sha256": "TO_BE_PINNED"
+  },
+  {
+    "name": "libneedle.dll",
+    "arch": "x64",
+    "url": "https://huggingface.co/Cactus-Compute/needle3/resolve/main/windows-x86_64/libneedle.dll",
+    "sha256": "TO_BE_PINNED"
+  },
+  {
+    "name": "libneedle.dll",
+    "arch": "arm64",
+    "url": "https://huggingface.co/Cactus-Compute/needle3/resolve/main/windows-arm64/libneedle.dll",
+    "sha256": "TO_BE_PINNED"
+  }
+]
