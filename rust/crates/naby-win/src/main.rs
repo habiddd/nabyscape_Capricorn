@@ -1,10 +1,10 @@
 //! NabyScape for Windows.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-pub mod wake;
-
 #[cfg(windows)]
-fn main() {}
+fn main() {
+    std::process::exit(naby_win::app::App::run());
+}
 
 #[cfg(not(windows))]
 fn main() {
