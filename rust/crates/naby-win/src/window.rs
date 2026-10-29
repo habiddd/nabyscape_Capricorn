@@ -189,8 +189,8 @@ pub(crate) use os::{ensure_class, set_user_data, user_data};
 #[cfg(windows)]
 mod os {
     use super::*;
-    use crate::clipboard;
     use crate::event::HostEvent;
+    use crate::text_clipboard;
     use naby_render::Canvas;
     use std::cell::{Cell, RefCell};
     use std::ffi::c_void;
@@ -727,7 +727,7 @@ mod os {
                     if ctrl && vk == 0x56 {
                         drop(input);
                         // Clipboard access can pump messages; the borrow is released first.
-                        if let Some(text) = clipboard::get_text(Some(hwnd)) {
+                        if let Some(text) = text_clipboard::get_text(Some(hwnd)) {
                             s.input.borrow_mut().paste(text);
                         }
                     } else {
