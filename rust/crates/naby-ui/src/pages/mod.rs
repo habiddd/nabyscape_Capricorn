@@ -34,6 +34,7 @@ mod battery;
 mod calendar;
 mod clips;
 mod clock;
+mod common;
 mod files;
 mod focus;
 mod links;

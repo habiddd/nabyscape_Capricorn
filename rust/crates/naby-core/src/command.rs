@@ -156,8 +156,20 @@ pub enum Command {
     LyricsImport {
         path: String,
     },
+    /// Ask for a `.lrc` file with the system file dialog, then import it (`LyricsFiles.Import`).
+    LyricsPickFile,
     /// Refresh the weather now (`force` skips the 20 minute cache).
     WeatherRefresh {
         force: bool,
     },
+    /// Look up cities by name for the weather location editor; the places arrive in
+    /// `Snapshots::places`.
+    WeatherSearch {
+        query: String,
+    },
+
+    // ---- system monitor ---------------------------------------------------------------
+    /// The system page switched tab (`"overview"`, `"hardware"`, `"network"`, `"storage"`,
+    /// `"processes"`): sample only what that tab shows.
+    SystemTab(String),
 }

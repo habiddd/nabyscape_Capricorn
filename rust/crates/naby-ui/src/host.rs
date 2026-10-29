@@ -20,7 +20,7 @@ use naby_core::session::SessionState;
 use naby_core::settings::Settings;
 use naby_core::system::battery::BatterySnapshot;
 use naby_core::system::MonitorSnapshot;
-use naby_core::weather::WeatherSnapshot;
+use naby_core::weather::{WeatherPlace, WeatherSnapshot};
 use naby_render::{Canvas, Fonts, InputState};
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
@@ -160,6 +160,50 @@ pub enum WeatherStatus {
     Loading,
     /// The last fetch failed; the message is user facing.
     Failed(String),
+}
+
+/// City search for the weather location editor.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlaceSearch {
+    /// What was asked for.
+    pub query: String,
+    pub state: PlaceSearchState,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum PlaceSearchState {
+    #[default]
+    Idle,
+    Searching,
+    /// Up to eight places (possibly none).
+    Found(Vec<WeatherPlace>),
+    /// Offline or the lookup failed.
+    Failed,
+}
+
+/// One media session the source picker offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSourceChoice {
+    /// App user model id.
+    pub id: String,
+    pub name: String,
+}
+
+/// The sessions to choose a media source from and which choice is active (`@auto`, `@none` or
+/// an app id).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSources {
+    pub sessions: Vec<MediaSourceChoice>,
+    pub selected: String,
+}
+
+impl Default for MediaSources {
+    fn default() -> Self {
+        MediaSources {
+            sessions: Vec::new(),
+            selected: naby_core::media::source::AUTO_ID.to_owned(),
+        }
+    }
 }
 
 /// One network adapter's current rates in bytes/second.
@@ -324,6 +368,10 @@ pub struct Snapshots {
     pub lyrics: Snap<LyricResult>,
     pub levels: AudioLevels,
     pub weather: Snap<WeatherState>,
+    /// City search results of the weather location editor.
+    pub places: Snap<PlaceSearch>,
+    /// Media sessions for the source picker.
+    pub sources: Snap<MediaSources>,
     pub system: Snap<SystemInfo>,
     pub battery: Snap<BatterySnapshot>,
     pub session: Snap<SessionState>,
@@ -358,6 +406,8 @@ impl Snapshots {
             }),
             levels: AudioLevels::default(),
             weather: Snap::default(),
+            places: Snap::default(),
+            sources: Snap::default(),
             system: Snap::default(),
             battery: Snap::new(BatterySnapshot::UNAVAILABLE),
             session: Snap::default(),
@@ -385,6 +435,8 @@ impl Snapshots {
             + self.mixer.version()
             + self.lyrics.version()
             + self.weather.version()
+            + self.places.version()
+            + self.sources.version()
             + self.system.version()
             + self.battery.version()
             + self.session.version()
