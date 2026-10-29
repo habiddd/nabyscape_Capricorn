@@ -1,6 +1,8 @@
 //! NabyScape for Windows.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+pub mod wake;
+
 #[cfg(windows)]
 fn main() {}
 
