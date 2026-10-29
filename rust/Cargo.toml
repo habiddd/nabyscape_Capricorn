@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/naby-core", "crates/naby-render", "crates/naby-ui", "crates/naby-win"]
+
+[workspace.package]
+version = "3.0.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+naby-core = { path = "crates/naby-core" }
+naby-render = { path = "crates/naby-render" }
+naby-ui = { path = "crates/naby-ui" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+fontdue = "0.9"
+png = "0.17"
+zune-jpeg = "0.4"
+base64 = "0.22"
+url = "2"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
