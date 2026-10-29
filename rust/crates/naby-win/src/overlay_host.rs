@@ -152,8 +152,9 @@ mod os {
     use naby_render::{Canvas, Fonts, Image, InputState};
     use naby_ui::host::{
         AppCatalog, AppEntry, AssistantSummary, AudioLevels, AwakeInfo, BrightnessState,
-        CalendarHandle, Demand, IconProvider, NetRates, NoticeState, Signal, Snapshots, SystemInfo,
-        View, WeatherState, WeatherStatus,
+        CalendarHandle, Demand, IconProvider, MediaSourceChoice, MediaSources, NetRates,
+        NoticeState, PlaceSearch, PlaceSearchState, Signal, Snapshots, SystemInfo, View,
+        WeatherState, WeatherStatus,
     };
     use naby_ui::{Overlay, OverlayState};
     use std::cell::RefCell;
@@ -173,6 +174,7 @@ mod os {
 
     type LyricsOutcome = (LyricsRequest, Result<String, FetchError>);
     type WeatherOutcome = (String, Result<WeatherSnapshot, WeatherError>);
+    type PlacesOutcome = (String, Result<Vec<weather::WeatherPlace>, WeatherError>);
 
     /// Shared with the OLE drop target callbacks, which run inside the message pump.
     #[derive(Default)]
@@ -221,6 +223,8 @@ mod os {
         weather_rx: Receiver<WeatherOutcome>,
         weather_busy: bool,
         weather_check_at: f64,
+        places_tx: Sender<PlacesOutcome>,
+        places_rx: Receiver<PlacesOutcome>,
         demand: Demand,
         last_media_source: String,
         files_drag: bool,
@@ -263,6 +267,42 @@ mod os {
         m.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// The "Timed lyrics for the current track" file dialog (`*.lrc`): the chosen path.
+    fn pick_lrc_file() -> Option<String> {
+        use windows::core::w;
+        use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
+        use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+        use windows::Win32::UI::Shell::{
+            FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
+            SIGDN_FILESYSPATH,
+        };
+        // SAFETY: plain COM calls on the UI thread (COM is initialised by the shell); the dialog
+        // and the shell item are released when dropped, and the returned display-name buffer is
+        // freed with `CoTaskMemFree` after it has been copied.
+        unsafe {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+            let filters = [COMDLG_FILTERSPEC {
+                pszName: w!("Timed lyrics (*.lrc)"),
+                pszSpec: w!("*.lrc"),
+            }];
+            dialog.SetFileTypes(&filters).ok()?;
+            dialog
+                .SetTitle(w!("Timed lyrics for the current track"))
+                .ok()?;
+            let options = dialog.GetOptions().ok()?;
+            dialog
+                .SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST)
+                .ok()?;
+            dialog.Show(None).ok()?;
+            let item = dialog.GetResult().ok()?;
+            let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let path = name.to_string().ok();
+            CoTaskMemFree(Some(name.0.cast_const().cast()));
+            path
+        }
+    }
+
     impl OverlayHost {
         pub fn new(
             store: Arc<Store>,
@@ -299,6 +339,7 @@ mod os {
             };
             let launcher = Rc::new(RefCell::new(LauncherService::start(icon_wake)));
             snaps.icons = Rc::new(LauncherIcons(Rc::clone(&launcher)));
+            let (places_tx, places_rx) = channel();
             let overlay = Overlay::new(&snaps);
             let mut host = OverlayHost {
                 media: naby_core::updates::runtime::media_features_wanted(&settings)
@@ -335,6 +376,8 @@ mod os {
                 weather_rx,
                 weather_busy: false,
                 weather_check_at: f64::INFINITY,
+                places_tx,
+                places_rx,
                 demand: Demand::default(),
                 last_media_source: String::new(),
                 files_drag: false,
@@ -473,6 +516,7 @@ mod os {
             self.pull_system();
             self.pull_lyrics();
             self.pull_weather();
+            self.pull_places();
             self.pull_clipboard();
             self.pull_downloads();
             self.pull_drops();
@@ -534,8 +578,20 @@ mod os {
             let now = self.snaps.now;
             let Some(media) = &self.media else {
                 self.snaps.media.set(Default::default());
+                self.snaps.sources.set(MediaSources::default());
                 return;
             };
+            self.snaps.sources.set(MediaSources {
+                sessions: media
+                    .sessions()
+                    .into_iter()
+                    .map(|s| MediaSourceChoice {
+                        id: s.id,
+                        name: s.name,
+                    })
+                    .collect(),
+                selected: media.source_selection_id(),
+            });
             let mut snap = media.snapshot();
             let (elapsed, _) = media.timeline();
             snap.position = StdDuration::from_secs_f64(elapsed.max(0.0));
@@ -635,6 +691,44 @@ mod os {
                         snapshot: previous,
                         status: WeatherStatus::Failed(error.to_string()),
                     },
+                });
+            }
+        }
+
+        fn pull_places(&mut self) {
+            while let Ok((query, outcome)) = self.places_rx.try_recv() {
+                if query != self.snaps.places.query {
+                    continue;
+                }
+                self.snaps.places.set(PlaceSearch {
+                    query,
+                    state: match outcome {
+                        Ok(places) => PlaceSearchState::Found(places),
+                        Err(_) => PlaceSearchState::Failed,
+                    },
+                });
+            }
+        }
+
+        /// City search for the weather location editor (`WeatherView.Search`).
+        fn search_places(&mut self, query: String) {
+            self.snaps.places.set(PlaceSearch {
+                query: query.clone(),
+                state: PlaceSearchState::Searching,
+            });
+            let tx = self.places_tx.clone();
+            let wake = self.wake.clone();
+            let spawned = std::thread::Builder::new()
+                .name("naby-places".into())
+                .spawn(move || {
+                    let result = WeatherService::search(&query, &weather::default_fetch);
+                    let _ = tx.send((query, result));
+                    wake();
+                });
+            if spawned.is_err() {
+                self.snaps.places.set(PlaceSearch {
+                    query: self.snaps.places.query.clone(),
+                    state: PlaceSearchState::Failed,
                 });
             }
         }
@@ -1233,7 +1327,22 @@ mod os {
                     self.load_lyrics();
                 }
                 Command::LyricsImport { path } => self.import_lyrics(&path),
+                Command::LyricsPickFile => {
+                    if let Some(path) = pick_lrc_file() {
+                        self.import_lyrics(&path);
+                    }
+                }
                 Command::WeatherRefresh { force } => self.request_weather(force),
+                Command::WeatherSearch { query } => self.search_places(query),
+                Command::SystemTab(tab) => {
+                    let s = &self.settings;
+                    self.system.set_options(SystemOptions::for_tab(
+                        &tab,
+                        s.monitor_network,
+                        s.monitor_storage,
+                        s.monitor_processes,
+                    ));
+                }
             }
         }
 
@@ -1250,6 +1359,13 @@ mod os {
         }
 
         fn import_lyrics(&mut self, path: &str) {
+            if std::fs::metadata(path).is_ok_and(|m| m.len() > 512 * 1024) {
+                self.fail(
+                    "Could not import lyrics",
+                    "Choose an LRC file under 512 KB.",
+                );
+                return;
+            }
             let text = match std::fs::read_to_string(path) {
                 Ok(text) => text,
                 Err(error) => {
@@ -1263,6 +1379,11 @@ mod os {
                     .import(&media.title, &media.artist, media.timeline().1, &text)
             {
                 self.fail("Could not import lyrics", message);
+            } else if !self.settings.lyrics_enabled {
+                // Loading a local file switches lyrics on (`LyricsFiles.Import`).
+                let mut settings = self.settings.clone();
+                settings.lyrics_enabled = true;
+                self.apply_command_settings(settings);
             }
             self.snaps.lyrics.set(self.lyrics.result().clone());
         }
