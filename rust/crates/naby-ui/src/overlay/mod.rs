@@ -11,6 +11,8 @@
 //! `util` (hit map and helpers).
 
 mod closed;
+pub mod detached;
+mod dock_edit;
 mod feedback;
 mod hover;
 mod layout;
@@ -221,6 +223,7 @@ pub struct Overlay {
     pub(crate) file_drag: bool,
     pub(crate) focus_wanted: bool,
     pub(crate) editing_dock: bool,
+    pub(crate) dock_edit: dock_edit::DockEdit,
     pub(crate) tuck: TuckController,
 
     // ---- surface
@@ -310,6 +313,7 @@ impl Overlay {
             file_drag: false,
             focus_wanted: false,
             editing_dock: false,
+            dock_edit: dock_edit::DockEdit::default(),
             tuck: TuckController::new(),
             motion: SurfaceMotion::new(),
             surf: (snaps.settings.width, snaps.settings.height),
@@ -446,20 +450,32 @@ impl Overlay {
 impl View for Overlay {
     fn input(&mut self, input: &InputState, snaps: &Snapshots, out: &mut Vec<Command>) -> bool {
         self.sync(snaps);
-        let changed = self.handle_input(input, snaps);
+        self.dock_edit_sync(snaps);
+        let (consumed, edited) = self.dock_edit_input(input, snaps);
+        let changed = if consumed {
+            edited
+        } else {
+            self.handle_input(input, snaps) | edited
+        };
         self.flush(out);
         changed
     }
 
     fn signal(&mut self, signal: Signal, snaps: &Snapshots, out: &mut Vec<Command>) -> bool {
         self.sync(snaps);
-        let changed = self.handle_signal(signal, snaps);
+        self.dock_edit_sync(snaps);
+        let changed = if self.dock_edit_signal(signal, snaps) {
+            true
+        } else {
+            self.handle_signal(signal, snaps)
+        };
         self.flush(out);
         changed
     }
 
     fn tick(&mut self, snaps: &Snapshots, out: &mut Vec<Command>) -> bool {
         self.sync(snaps);
+        self.dock_edit_sync(snaps);
         let changed = self.advance(snaps);
         self.flush(out);
         changed
@@ -467,7 +483,9 @@ impl View for Overlay {
 
     fn paint(&mut self, canvas: &mut Canvas, fonts: &Fonts, snaps: &Snapshots) {
         self.sync(snaps);
+        self.dock_edit_sync(snaps);
         self.paint_all(canvas, fonts, snaps);
+        self.paint_dock_edit(canvas, fonts, snaps);
         self.dirty = false;
     }
 
@@ -488,7 +506,8 @@ impl View for Overlay {
     }
 
     fn wants_focus(&self) -> bool {
-        self.expanded && !self.user_hidden && !self.env_hidden
+        // The dock editing mode reads the arrow keys, Enter and Escape.
+        (self.expanded || self.dock_edit.active) && !self.user_hidden && !self.env_hidden
     }
 
     fn interaction_active(&self) -> bool {
@@ -519,4 +538,4 @@ impl Overlay {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

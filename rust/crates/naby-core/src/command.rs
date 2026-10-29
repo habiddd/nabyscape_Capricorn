@@ -160,4 +160,21 @@ pub enum Command {
     WeatherRefresh {
         force: bool,
     },
+
+    // ---- tool pages ---------------------------------------------------------------------
+    /// Begin dragging these existing files out of the dock (OLE drag source; the host runs the
+    /// drag loop and returns when the files were dropped or the drag was cancelled).
+    DragFilesOut(Vec<String>),
+    /// Show the system file picker and stage the chosen files on the shelf ("Add files...").
+    PickShelfFiles,
+    /// Export a clipboard-history image through the system save dialog ("Save as PNG...").
+    SaveClipImage {
+        id: String,
+    },
+    /// Collapse the open panel or peek back to the closed dock (a shortcut was launched).
+    CollapseDock,
+    /// The installed-app picker opened: the host builds the app catalog.
+    OpenAppPicker,
+    /// The picker closed: the host drops the catalog and its icons.
+    CloseAppPicker,
 }

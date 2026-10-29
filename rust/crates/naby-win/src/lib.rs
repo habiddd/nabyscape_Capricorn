@@ -8,6 +8,8 @@ pub mod app;
 pub mod awake;
 pub mod clipboard;
 pub mod credentials;
+pub mod detached_host;
+pub mod dialogs;
 pub mod event;
 pub mod fullscreen;
 pub mod hotkeys;

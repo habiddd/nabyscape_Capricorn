@@ -65,6 +65,11 @@ pub trait Surface {
     }
     /// The window was hidden: drop caches.
     fn on_hide(&mut self) {}
+    /// Handle the input and frames of any auxiliary windows the surface owns (detached
+    /// previews). Called after every pass of the message loop. True when one was painted.
+    fn pump_detached(&mut self) -> bool {
+        false
+    }
     /// Things only the app shell can do (settings window, tray balloons, quit).
     fn take_actions(&mut self) -> Vec<ShellAction> {
         Vec::new()
@@ -495,6 +500,9 @@ mod os {
                 while let Ok(event) = self.rx.try_recv() {
                     self.handle_event(event);
                 }
+                if self.surface.pump_detached() {
+                    self.reschedule();
+                }
                 if self.quit {
                     return 0;
                 }
@@ -579,9 +587,9 @@ mod os {
                 TrayCommand::HideShow => self.signal(Signal::ToggleVisibility),
                 TrayCommand::Tuck => self.signal(Signal::ToggleTuck),
                 TrayCommand::Quit => self.quit = true,
+                TrayCommand::MoveResize => self.toggle_dock_editing(),
                 // Assistant- and command-bar-specific commands arrive with those tasks.
                 TrayCommand::CommandBar
-                | TrayCommand::MoveResize
                 | TrayCommand::Assistant
                 | TrayCommand::ToggleWake
                 | TrayCommand::StopMicrophones => {}
@@ -589,6 +597,19 @@ mod os {
         }
 
         // ---- settings, monitors, visibility ---------------------------------------------
+
+        /// "Move & resize island": flips `DockUnlocked` like C# `ToggleDockEditing`; the dock
+        /// shows its drag handles while it is set and ends the mode itself with Done / Cancel.
+        fn toggle_dock_editing(&mut self) {
+            let mut settings = self.settings.clone();
+            settings.dock_unlocked = !settings.dock_unlocked;
+            settings.normalize();
+            if let Err(error) = self.store.save_settings(&settings) {
+                self.store.log(&error);
+            }
+            self.settings = settings;
+            self.apply_settings();
+        }
 
         /// Pushes `self.settings` into every part of the shell (also the hook for the future
         /// settings window).
@@ -658,6 +679,7 @@ mod os {
                         "Assistant",
                         "The assistant is not part of this build of the new shell yet.",
                     ),
+                    ShellAction::SettingsPreview(settings) => self.settings = *settings,
                     ShellAction::SettingsApplied(settings) => {
                         self.settings = *settings;
                         self.hotkeys.configure(self.host, &self.settings);

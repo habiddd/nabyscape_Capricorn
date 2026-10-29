@@ -17,11 +17,11 @@ use naby_core::motion::RectI;
 use naby_core::notifications::InternalNotice;
 use naby_core::productivity::{Calendar, CalendarError, CalendarEvent, ProductivityService};
 use naby_core::session::SessionState;
-use naby_core::settings::Settings;
+use naby_core::settings::{Settings, Shortcut};
 use naby_core::system::battery::BatterySnapshot;
 use naby_core::system::MonitorSnapshot;
 use naby_core::weather::WeatherSnapshot;
-use naby_render::{Canvas, Fonts, InputState};
+use naby_render::{Canvas, Fonts, Image, InputState};
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 use std::rc::Rc;
@@ -238,6 +238,70 @@ pub struct AwakeInfo {
     pub minutes_left: Option<u32>,
 }
 
+/// One installed app the picker can add (C# `InstalledApp`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppEntry {
+    pub name: String,
+    pub target: String,
+    pub app_id: Option<String>,
+}
+
+impl AppEntry {
+    pub fn to_shortcut(&self) -> Shortcut {
+        Shortcut {
+            name: self.name.clone(),
+            target: self.target.clone(),
+            app_id: self.app_id.clone(),
+        }
+    }
+}
+
+/// The installed-app catalog while the picker is open (`Command::OpenAppPicker`).
+#[derive(Debug, Clone, Default)]
+pub enum AppCatalog {
+    /// The picker is closed: no catalog is held.
+    #[default]
+    Closed,
+    Loading,
+    Ready(Arc<Vec<AppEntry>>),
+    Failed(String),
+}
+
+impl PartialEq for AppCatalog {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (AppCatalog::Closed, AppCatalog::Closed)
+            | (AppCatalog::Loading, AppCatalog::Loading) => true,
+            (AppCatalog::Ready(a), AppCatalog::Ready(b)) => Arc::ptr_eq(a, b),
+            (AppCatalog::Failed(a), AppCatalog::Failed(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Icons and file previews. Calls never block: a missing image is queued by the host and
+/// `Snapshots::icons_revision` moves when it arrives, so the page asks again on the next paint.
+pub trait IconProvider {
+    /// The launcher icon of a shortcut (`pixels` square, 16..=768).
+    fn shortcut_icon(&self, shortcut: &Shortcut, pixels: u32) -> Option<Arc<Image>>;
+    /// A preview of a local file (64..=768 px).
+    fn file_thumbnail(&self, path: &str, pixels: u32) -> Option<Arc<Image>>;
+    /// The panel closed: drop cached images.
+    fn clear(&self) {}
+}
+
+/// The provider of tests and of hosts without a shell: nothing has an icon.
+pub struct NoIcons;
+
+impl IconProvider for NoIcons {
+    fn shortcut_icon(&self, _: &Shortcut, _: u32) -> Option<Arc<Image>> {
+        None
+    }
+    fn file_thumbnail(&self, _: &str, _: u32) -> Option<Arc<Image>> {
+        None
+    }
+}
+
 // ---- shared handles -------------------------------------------------------------------
 
 /// Notes, tasks, shelf and clipboard history. Mutate directly; the service saves itself.
@@ -334,6 +398,12 @@ pub struct Snapshots {
     pub productivity: ProductivityHandle,
     pub productivity_revision: u64,
     pub calendar: Rc<CalendarHandle>,
+    /// The installed-app catalog (open only while the shortcuts picker is shown).
+    pub catalog: Snap<AppCatalog>,
+    /// Launcher icons and file previews.
+    pub icons: Rc<dyn IconProvider>,
+    /// Moves whenever the host finished loading an icon, preview or catalog.
+    pub icons_revision: u64,
     /// Bumped by the host when system-level environment facts the views cache changed (fonts,
     /// high-contrast) — rarely used.
     pub environment: u64,
@@ -371,6 +441,9 @@ impl Snapshots {
             ))),
             productivity_revision: 0,
             calendar: CalendarHandle::in_memory(),
+            catalog: Snap::default(),
+            icons: Rc::new(NoIcons),
+            icons_revision: 0,
             environment: 0,
         }
     }
@@ -394,6 +467,8 @@ impl Snapshots {
             + self.awake.version()
             + self.productivity_revision
             + self.calendar.revision()
+            + self.catalog.version()
+            + self.icons_revision
             + self.environment
     }
 
@@ -432,6 +507,8 @@ pub struct Demand {
     pub system: bool,
     /// Fetch and refresh the weather.
     pub weather: bool,
+    /// Build the installed-app catalog (the shortcuts page shows its app picker).
+    pub catalog: bool,
 }
 
 impl Demand {
@@ -443,6 +520,7 @@ impl Demand {
             mixer: self.mixer || other.mixer,
             system: self.system || other.system,
             weather: self.weather || other.weather,
+            catalog: self.catalog || other.catalog,
         }
     }
 }
