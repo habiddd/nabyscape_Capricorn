@@ -364,7 +364,7 @@ pub fn paste_choice(
 }
 
 #[cfg(windows)]
-pub use os::{read_paste, ClipboardService};
+pub use os::{read_paste, set_image_png, ClipboardService};
 
 #[cfg(windows)]
 mod os {
@@ -625,6 +625,18 @@ mod os {
             }
         }
         false
+    }
+
+    /// Puts a PNG on the clipboard (as `CF_DIBV5` plus the registered "PNG" format) without going
+    /// through the history service: the assistant's "Copy image".
+    pub fn set_image_png(png: &[u8]) -> Result<(), String> {
+        let image = decode_png(png).ok_or_else(|| "The image is unreadable.".to_owned())?;
+        let mut formats = vec![(u32::from(CF_DIBV5.0), rgba_to_dibv5(&image))];
+        let png_format = register_format("PNG");
+        if png_format != 0 {
+            formats.push((png_format, png.to_vec()));
+        }
+        write_clipboard(&formats)
     }
 
     fn write_clipboard(formats: &[(u32, Vec<u8>)]) -> Result<(), String> {

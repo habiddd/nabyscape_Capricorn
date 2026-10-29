@@ -6,6 +6,7 @@
 //! application state is never borrowed re-entrantly from inside Win32 callbacks.
 
 use crate::overlay_host::ShellAction;
+use naby_core::command::Command;
 use naby_core::settings::{presets, Settings};
 use naby_core::store::Store;
 use naby_render::{Canvas, Fonts, InputState};
@@ -69,6 +70,15 @@ pub trait Surface {
     fn take_actions(&mut self) -> Vec<ShellAction> {
         Vec::new()
     }
+    /// Runs commands produced outside the dock (the assistant window). True when a repaint is
+    /// needed.
+    fn run_commands(&mut self, _commands: Vec<Command>) -> bool {
+        false
+    }
+    /// The assistant's state for the closed dock. True when it changed.
+    fn set_assistant_summary(&mut self, _summary: naby_ui::host::AssistantSummary) -> bool {
+        false
+    }
 }
 
 /// Command line of the app (the C# modes that belong to other tasks are not parsed here).
@@ -80,6 +90,8 @@ pub struct Args {
     pub background: bool,
     /// `--settings`: open Settings after startup.
     pub settings: bool,
+    /// `--widget-mcp`: serve the widget pages as an MCP server over stdio (for Hermes).
+    pub widget_mcp: bool,
 }
 
 impl Args {
@@ -94,6 +106,7 @@ impl Args {
                 "--exit" => parsed.exit = true,
                 "--background" => parsed.background = true,
                 "--settings" => parsed.settings = true,
+                "--widget-mcp" => parsed.widget_mcp = true,
                 _ => {}
             }
         }
@@ -128,6 +141,7 @@ pub use os::{App, HostHandle};
 #[cfg(windows)]
 mod os {
     use super::*;
+    use crate::assistant_host::AssistantHost;
     use crate::event::{HostEvent, WM_APP_TRAY, WM_APP_WAKE};
     use crate::fullscreen::{foreground_should_hide, ForegroundHooks};
     use crate::hotkeys::{HotkeyAction, Hotkeys};
@@ -291,6 +305,7 @@ mod os {
         canvas: Canvas,
         window: LayeredWindow,
         surface: Box<dyn Surface>,
+        assistant: AssistantHost,
         tray: Tray,
         hotkeys: Hotkeys,
         timer: AnimationTimer,
@@ -310,6 +325,9 @@ mod os {
         /// Runs the whole application and returns the process exit code.
         pub fn run() -> i32 {
             let args = Args::parse(std::env::args().skip(1));
+            if args.widget_mcp {
+                return crate::widget_bridge::run_stdio();
+            }
             if args.exit {
                 instance::signal_exit();
                 return 0;
@@ -381,6 +399,7 @@ mod os {
                 .map(|i| display_info(&monitors[i], refresh_rate(&monitors[i].id)))
                 .unwrap_or_default();
             let waker = make_waker(host, wake_pending.clone());
+            let assistant = AssistantHost::new(store.clone(), waker.clone(), tx.clone(), &settings);
             let mut overlay = OverlayHost::new(store.clone(), waker, settings.clone(), display);
             let window = LayeredWindow::new(tx.clone())?;
             overlay.attach_window(window.hwnd());
@@ -402,6 +421,7 @@ mod os {
                 canvas: Canvas::new(1, 1),
                 window,
                 surface,
+                assistant,
                 tray,
                 hotkeys: Hotkeys::new(),
                 timer,
@@ -508,7 +528,14 @@ mod os {
         fn handle_event(&mut self, event: HostEvent) {
             match event {
                 HostEvent::Wake => {
-                    let changed = self.surface.wake();
+                    let mut changed = self.surface.wake();
+                    changed |= self.assistant_wake();
+                    self.after_surface(changed);
+                }
+                HostEvent::Assistant => {
+                    let commands = self.assistant.on_event();
+                    let mut changed = self.run_commands(commands);
+                    changed |= self.assistant_wake();
                     self.after_surface(changed);
                 }
                 HostEvent::Hotkey(action) => {
@@ -537,6 +564,7 @@ mod os {
                         .filter(|id| self.monitors.iter().any(|m| &m.id == id));
                     self.sync_display();
                     self.check_environment();
+                    self.assistant.display_changed(&self.monitors);
                     self.signal(Signal::DisplayChanged);
                 }
                 HostEvent::ForegroundChanged => {
@@ -572,6 +600,29 @@ mod os {
             self.after_surface(changed);
         }
 
+        /// Opens the assistant window (or brings it forward) on the dock's monitor.
+        fn open_assistant(&mut self) {
+            self.assistant.open(&self.monitors);
+            let changed = self.assistant_wake();
+            self.after_surface(changed);
+        }
+
+        /// Runs commands from the assistant on the dock. True when a repaint is needed.
+        fn run_commands(&mut self, commands: Vec<Command>) -> bool {
+            !commands.is_empty() && self.surface.run_commands(commands)
+        }
+
+        /// Pulls what the assistant's workers published: widget navigation commands for the dock
+        /// and the closed-dock label. True when the dock must repaint.
+        fn assistant_wake(&mut self) -> bool {
+            let (commands, summary) = self.assistant.on_wake();
+            let mut changed = self.run_commands(commands);
+            if let Some(summary) = summary {
+                changed |= self.surface.set_assistant_summary(summary);
+            }
+            changed
+        }
+
         fn tray_command(&mut self, command: TrayCommand) {
             match command {
                 TrayCommand::OpenIsland => self.signal(Signal::Panel),
@@ -579,10 +630,11 @@ mod os {
                 TrayCommand::HideShow => self.signal(Signal::ToggleVisibility),
                 TrayCommand::Tuck => self.signal(Signal::ToggleTuck),
                 TrayCommand::Quit => self.quit = true,
-                // Assistant- and command-bar-specific commands arrive with those tasks.
+                TrayCommand::Assistant => self.open_assistant(),
+                // Command-bar-, wake-word- and microphone-specific commands arrive with those
+                // tasks.
                 TrayCommand::CommandBar
                 | TrayCommand::MoveResize
-                | TrayCommand::Assistant
                 | TrayCommand::ToggleWake
                 | TrayCommand::StopMicrophones => {}
             }
@@ -596,6 +648,7 @@ mod os {
             self.hotkeys.configure(self.host, &self.settings);
             self.window.set_opacity(self.settings.opacity as f32);
             self.surface.apply_settings(&self.settings);
+            self.assistant.apply_settings(&self.settings);
             let wants_hooks = self.settings.hide_fullscreen || self.settings.hide_maximized;
             if wants_hooks && self.hooks.is_none() {
                 self.hooks = Some(ForegroundHooks::install(self.tx.clone()));
@@ -654,12 +707,14 @@ mod os {
                     ShellAction::OpenSettings(_) => self.open_settings(),
                     ShellAction::Quit => self.quit = true,
                     ShellAction::Balloon { title, detail } => self.notify(&title, &detail),
-                    ShellAction::OpenAssistant | ShellAction::OpenVoice => self.notify(
-                        "Assistant",
-                        "The assistant is not part of this build of the new shell yet.",
+                    ShellAction::OpenAssistant => self.open_assistant(),
+                    ShellAction::OpenVoice => self.notify(
+                        "Voice",
+                        "Voice conversations are not part of this build of the new shell yet.",
                     ),
                     ShellAction::SettingsApplied(settings) => {
                         self.settings = *settings;
+                        self.assistant.apply_settings(&self.settings);
                         self.hotkeys.configure(self.host, &self.settings);
                         self.window.set_opacity(self.settings.opacity as f32);
                     }
@@ -815,9 +870,11 @@ mod tests {
             Args {
                 exit: false,
                 background: true,
-                settings: true
+                settings: true,
+                widget_mcp: false
             }
         );
+        assert!(Args::parse(["--widget-mcp"]).widget_mcp);
         assert!(Args::parse(["--exit"]).exit);
         assert_eq!(Args::parse(Vec::<String>::new()), Args::default());
     }

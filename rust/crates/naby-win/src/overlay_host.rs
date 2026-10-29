@@ -1247,6 +1247,15 @@ mod os {
         fn take_actions(&mut self) -> Vec<ShellAction> {
             std::mem::take(&mut self.actions)
         }
+
+        fn run_commands(&mut self, commands: Vec<Command>) -> bool {
+            self.out.extend(commands);
+            self.execute_pending()
+        }
+
+        fn set_assistant_summary(&mut self, summary: AssistantSummary) -> bool {
+            self.snaps.assistant.set(summary)
+        }
     }
 
     impl OverlayHost {

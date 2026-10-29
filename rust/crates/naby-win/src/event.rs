@@ -37,6 +37,9 @@ pub enum HostEvent {
     WindowDpi(u32),
     /// The dock window lost keyboard focus it had taken for text editing.
     TextFocusLost,
+    /// The assistant window has input, a timer fired, or it asked to close (see
+    /// `assistant_host`).
+    Assistant,
     /// A left or right mouse press anywhere on screen (only while the outside-click hook runs);
     /// screen coordinates.
     OutsideClick {
