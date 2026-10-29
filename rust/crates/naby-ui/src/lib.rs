@@ -7,6 +7,7 @@
 //! * [`overlay`]: the dock ([`overlay::Overlay`]).
 //! * [`pages`]: widget pages of the open panel; one file per widget id.
 
+pub mod assistant;
 pub mod host;
 pub mod overlay;
 pub mod pages;

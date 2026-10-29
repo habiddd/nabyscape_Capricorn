@@ -5,6 +5,7 @@
 //! scheduling) compile and are tested on every platform.
 
 pub mod app;
+pub mod assistant_host;
 pub mod awake;
 pub mod clipboard;
 pub mod credentials;
@@ -15,6 +16,7 @@ pub mod fullscreen;
 pub mod hotkeys;
 pub mod instance;
 pub mod monitors;
+pub mod office_text;
 pub mod outside_click;
 pub mod overlay_host;
 pub mod shell;
@@ -24,6 +26,7 @@ pub mod timer;
 pub mod tray;
 pub mod util;
 pub mod wake;
+pub mod widget_bridge;
 pub mod window;
 
 // Media and audio services. Pure helpers build everywhere; OS services are Windows-only.
@@ -47,6 +50,7 @@ pub mod sounds;
 pub mod tone;
 
 // System, clipboard history, downloads, launcher, drag-drop and capture services.
+pub mod attachment_prep;
 pub mod battery;
 pub mod capture;
 pub mod downloads;

@@ -190,7 +190,7 @@ pub fn encode_frame(
 }
 
 #[cfg(windows)]
-pub use os::{list_targets, CaptureService, CaptureState};
+pub use os::{capture_now, is_alive, list_targets, CaptureService, CaptureState};
 
 #[cfg(windows)]
 mod os {
