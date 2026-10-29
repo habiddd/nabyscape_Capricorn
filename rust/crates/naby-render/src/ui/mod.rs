@@ -11,6 +11,7 @@
 
 mod color_picker;
 mod extras;
+mod hit;
 mod input;
 mod scroll;
 mod text_edit;

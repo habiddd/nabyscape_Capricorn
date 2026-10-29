@@ -47,6 +47,7 @@ mod system;
 mod tasks;
 mod timer;
 mod tools;
+mod tools_common;
 mod voice;
 mod volume;
 mod weather;

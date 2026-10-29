@@ -31,6 +31,9 @@ pub enum ShellAction {
     OpenVoice,
     /// New preferences are in effect (already saved): re-register hotkeys, hooks, opacity.
     SettingsApplied(Box<naby_core::settings::Settings>),
+    /// The island layout changed while it is being moved or resized (not saved yet): the shell
+    /// only remembers the values, so a later toggle keeps the edit.
+    SettingsPreview(Box<naby_core::settings::Settings>),
 }
 
 /// The dock's monitor as the views see it.
@@ -124,8 +127,11 @@ mod os {
     use crate::battery::BatteryService;
     use crate::brightness::BrightnessService;
     use crate::clipboard::{ClipboardEvent, ClipboardService};
+    use crate::detached_host::DetachedHost;
+    use crate::dialogs;
     use crate::downloads::{DownloadEvent, DownloadWatcher};
     use crate::dragdrop::{self, DropEvent, DropRegistration};
+    use crate::launcher::{CatalogState, LauncherService};
     use crate::loopback::{LoopbackLease, LoopbackService, Need};
     use crate::media::MediaService;
     use crate::mixer::MixerService;
@@ -143,14 +149,16 @@ mod os {
     use naby_core::settings::Settings;
     use naby_core::store::Store;
     use naby_core::weather::{self, WeatherError, WeatherService, WeatherSnapshot};
-    use naby_render::{Canvas, Fonts, InputState};
+    use naby_render::{Canvas, Fonts, Image, InputState};
     use naby_ui::host::{
-        AssistantSummary, AudioLevels, AwakeInfo, BrightnessState, CalendarHandle, Demand,
-        NetRates, NoticeState, Signal, Snapshots, SystemInfo, View, WeatherState, WeatherStatus,
+        AppCatalog, AppEntry, AssistantSummary, AudioLevels, AwakeInfo, BrightnessState,
+        CalendarHandle, Demand, IconProvider, NetRates, NoticeState, Signal, Snapshots, SystemInfo,
+        View, WeatherState, WeatherStatus,
     };
     use naby_ui::{Overlay, OverlayState};
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration as StdDuration, Instant};
@@ -217,6 +225,38 @@ mod os {
         last_media_source: String,
         files_drag: bool,
         repaint_requested: bool,
+        // ---- tool pages
+        launcher: Rc<RefCell<LauncherService>>,
+        icon_epoch: Arc<AtomicU64>,
+        catalog_source: Option<(usize, Arc<Vec<AppEntry>>)>,
+        picker_open: bool,
+        detached: DetachedHost,
+        dock_editing: bool,
+        pending_drag: Option<Vec<String>>,
+    }
+
+    /// Launcher icons and file previews for the views (never blocks: a miss queues the
+    /// extraction and the wake it causes repaints).
+    struct LauncherIcons(Rc<RefCell<LauncherService>>);
+
+    impl IconProvider for LauncherIcons {
+        fn shortcut_icon(
+            &self,
+            shortcut: &naby_core::settings::Shortcut,
+            pixels: u32,
+        ) -> Option<Arc<Image>> {
+            self.0.try_borrow_mut().ok()?.icon(shortcut, pixels)
+        }
+
+        fn file_thumbnail(&self, path: &str, pixels: u32) -> Option<Arc<Image>> {
+            self.0.try_borrow_mut().ok()?.file_thumbnail(path, pixels)
+        }
+
+        fn clear(&self) {
+            if let Ok(launcher) = self.0.try_borrow() {
+                launcher.clear_icons();
+            }
+        }
     }
 
     fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -248,6 +288,17 @@ mod os {
             snaps.session.replace(session.clone());
             let (lyrics_tx, lyrics_rx) = channel();
             let (weather_tx, weather_rx) = channel();
+            let icon_epoch = Arc::new(AtomicU64::new(0));
+            let icon_wake: Waker = {
+                let epoch = Arc::clone(&icon_epoch);
+                let wake = wake.clone();
+                Arc::new(move || {
+                    epoch.fetch_add(1, Ordering::AcqRel);
+                    wake();
+                })
+            };
+            let launcher = Rc::new(RefCell::new(LauncherService::start(icon_wake)));
+            snaps.icons = Rc::new(LauncherIcons(Rc::clone(&launcher)));
             let overlay = Overlay::new(&snaps);
             let mut host = OverlayHost {
                 media: naby_core::updates::runtime::media_features_wanted(&settings)
@@ -288,6 +339,13 @@ mod os {
                 last_media_source: String::new(),
                 files_drag: false,
                 repaint_requested: false,
+                launcher,
+                icon_epoch,
+                catalog_source: None,
+                picker_open: false,
+                detached: DetachedHost::new(Arc::clone(&store)),
+                dock_editing: false,
+                pending_drag: None,
                 store,
                 wake,
                 base,
@@ -419,8 +477,57 @@ mod os {
             self.pull_downloads();
             self.pull_drops();
             self.publish_awake();
+            self.pull_launcher();
             self.snaps.productivity_revision = self.snaps.productivity.borrow().revision();
             self.sync_drop_accept();
+        }
+
+        /// Publishes the app catalog and moves `icons_revision` when an icon arrived.
+        fn pull_launcher(&mut self) {
+            self.snaps.icons_revision = self.icon_epoch.load(Ordering::Acquire);
+            let state = match self.launcher.borrow().snapshot() {
+                CatalogState::Closed => AppCatalog::Closed,
+                CatalogState::Loading => AppCatalog::Loading,
+                CatalogState::Failed(message) => AppCatalog::Failed(message),
+                CatalogState::Ready(apps) => {
+                    let id = Arc::as_ptr(&apps) as usize;
+                    let entries = match &self.catalog_source {
+                        Some((source, entries)) if *source == id => Arc::clone(entries),
+                        _ => {
+                            let entries = Arc::new(
+                                apps.iter()
+                                    .map(|a| AppEntry {
+                                        name: a.name.clone(),
+                                        target: a.target.clone(),
+                                        app_id: a.app_id.clone(),
+                                    })
+                                    .collect::<Vec<_>>(),
+                            );
+                            self.catalog_source = Some((id, Arc::clone(&entries)));
+                            entries
+                        }
+                    };
+                    AppCatalog::Ready(entries)
+                }
+            };
+            if !matches!(state, AppCatalog::Ready(_)) {
+                self.catalog_source = None;
+            }
+            self.snaps.catalog.set(state);
+        }
+
+        /// Opens or closes the app catalog (the shortcuts page shows its picker).
+        fn set_picker(&mut self, open: bool) {
+            if open == self.picker_open {
+                return;
+            }
+            self.picker_open = open;
+            let mut launcher = self.launcher.borrow_mut();
+            if open {
+                launcher.open_picker();
+            } else {
+                launcher.close_picker();
+            }
         }
 
         fn pull_media(&mut self) {
@@ -765,7 +872,11 @@ mod os {
 
         /// Starts or stops services to match what the views need right now.
         fn reconcile_demand(&mut self) {
-            let wanted = self.overlay.demand(&self.snaps);
+            let wanted = self
+                .overlay
+                .demand(&self.snaps)
+                .merge(self.detached.demand(&self.snaps));
+            self.set_picker(wanted.catalog);
             if wanted == self.demand {
                 return;
             }
@@ -861,6 +972,8 @@ mod os {
             self.reconcile_demand();
             self.weather_heartbeat();
             self.sync_drop_accept();
+            self.run_pending_drag();
+            changed |= self.pump_detached_windows();
             changed
         }
 
@@ -897,10 +1010,12 @@ mod os {
                             .signal(Signal::ShowPage(page), &self.snaps, &mut self.out);
                     }
                 }
-                Command::DetachPreview { .. } => self.actions.push(ShellAction::Balloon {
-                    title: "Detached previews".to_owned(),
-                    detail: "Floating previews are not part of this build yet.".to_owned(),
-                }),
+                Command::DetachPreview { page, at, .. } => {
+                    // Pages that cannot be detached are ignored, as `CanOpen` does.
+                    if self.detached.open(&page, Some(at), &self.snaps) {
+                        self.repaint_requested = true;
+                    }
+                }
                 Command::ToggleTuck => {
                     self.overlay
                         .signal(Signal::ToggleTuck, &self.snaps, &mut self.out);
@@ -910,7 +1025,38 @@ mod os {
                         .signal(Signal::ToggleVisibility, &self.snaps, &mut self.out);
                 }
                 Command::ApplySettings(settings) => self.apply_command_settings(*settings),
-                Command::SetDockEditing(_) => {}
+                Command::SetDockEditing(on) => self.dock_editing = on,
+                Command::CollapseDock => {
+                    self.overlay
+                        .signal(Signal::Escape, &self.snaps, &mut self.out);
+                }
+                Command::DragFilesOut(paths) => {
+                    // The OLE drag loop must not run inside a paint: do it after this pass.
+                    self.pending_drag = Some(paths);
+                    self.repaint_requested = true;
+                }
+                Command::PickShelfFiles => {
+                    let files = dialogs::pick_files("Add to file shelf");
+                    if !files.is_empty() {
+                        self.snaps.productivity.borrow_mut().add_files(files);
+                    }
+                }
+                Command::SaveClipImage { id } => {
+                    if let Some(path) =
+                        dialogs::save_png_as("Save clipboard image", "Clipboard image.png")
+                    {
+                        let saved = self
+                            .snaps
+                            .productivity
+                            .borrow_mut()
+                            .save_clip_image(&id, std::path::Path::new(&path));
+                        if !saved {
+                            self.fail("Could not save image", "Check the location and try again.");
+                        }
+                    }
+                }
+                Command::OpenAppPicker => self.set_picker(true),
+                Command::CloseAppPicker => self.set_picker(false),
 
                 Command::MediaToggle => self.with_media(|m| m.toggle()),
                 Command::MediaPlay => self.with_media(|m| m.play()),
@@ -1123,16 +1269,46 @@ mod os {
 
         fn apply_command_settings(&mut self, mut settings: Settings) {
             settings.normalize();
-            match self.store.save_settings(&settings) {
-                Ok(()) => {}
-                Err(error) => {
-                    self.store.log(&error);
-                    self.fail("Not saved yet", "Could not save the settings.");
+            // While the island is being moved or resized the steps stay in memory; the final
+            // layout (the apply that locks the dock again) is saved and announced.
+            let transient = self.dock_editing && settings.dock_unlocked;
+            if !transient {
+                match self.store.save_settings(&settings) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        self.store.log(&error);
+                        self.fail("Not saved yet", "Could not save the settings.");
+                    }
                 }
             }
             self.apply_settings_inner(&settings);
-            self.actions
-                .push(ShellAction::SettingsApplied(Box::new(settings)));
+            self.actions.push(if transient {
+                ShellAction::SettingsPreview(Box::new(settings))
+            } else {
+                ShellAction::SettingsApplied(Box::new(settings))
+            });
+        }
+
+        /// Runs a requested drag-out of shelf files (blocks in OLE's modal loop).
+        fn run_pending_drag(&mut self) {
+            let Some(paths) = self.pending_drag.take() else {
+                return;
+            };
+            if dragdrop::drag_files_out(&paths) == dragdrop::DragOutcome::Failed {
+                self.fail(
+                    "Could not drag files",
+                    "The files could not be dragged out.",
+                );
+            }
+        }
+
+        /// Input, requests and frames of the detached previews.
+        fn pump_detached_windows(&mut self) -> bool {
+            let hidden = self.overlay.user_hidden();
+            self.detached.set_hidden(hidden);
+            let presented = self.detached.pump(&self.snaps, &mut self.out);
+            self.execute_pending();
+            presented
         }
     }
 
@@ -1187,12 +1363,16 @@ mod os {
             if self.demand.weather {
                 add(self.weather_check_at.max(now));
             }
+            if let Some(t) = self.detached.next_frame(now) {
+                add(t);
+            }
             next.map(|t| self.base + StdDuration::from_secs_f64(t.max(0.0)))
         }
 
         fn apply_settings(&mut self, settings: &Settings) {
             self.apply_settings_inner(settings);
             self.pull_all();
+            self.detached.apply_settings(&self.snaps);
             self.run_overlay();
         }
 
@@ -1222,7 +1402,15 @@ mod os {
             changed |= self.execute_pending();
             self.reconcile_demand();
             self.sync_drop_accept();
+            self.pump_detached_windows();
             changed
+        }
+
+        fn pump_detached(&mut self) -> bool {
+            self.stamp();
+            let presented = self.pump_detached_windows();
+            self.reconcile_demand();
+            presented
         }
 
         fn wants_focus(&self) -> bool {
@@ -1237,7 +1425,7 @@ mod os {
         }
 
         fn interaction_active(&self) -> bool {
-            self.overlay.interaction_active()
+            self.overlay.interaction_active() || self.detached.interaction_active()
         }
 
         fn on_hide(&mut self) {
