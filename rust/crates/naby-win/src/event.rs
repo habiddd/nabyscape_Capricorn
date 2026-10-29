@@ -57,4 +57,6 @@ pub enum HostEvent {
     AuxInput(AuxWindow),
     /// An auxiliary window was destroyed.
     AuxClosed(AuxWindow),
+    /// The update service changed state (status, progress, a notice to show).
+    UpdateChanged,
 }

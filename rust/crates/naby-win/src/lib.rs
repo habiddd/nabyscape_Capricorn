@@ -14,21 +14,27 @@ pub mod dialogs;
 pub mod event;
 pub mod fullscreen;
 pub mod hotkeys;
+pub mod install;
 pub mod instance;
 pub mod monitors;
 pub mod office_text;
 pub mod outside_click;
 pub mod overlay_host;
+pub mod selftest;
 pub mod settings_host;
 pub mod shell;
 pub mod startup;
 pub mod text_clipboard;
 pub mod timer;
 pub mod tray;
+pub mod uninstall;
+pub mod update;
 pub mod util;
 pub mod wake;
 pub mod widget_bridge;
 pub mod window;
+#[cfg(windows)]
+pub mod winops;
 
 // Media and audio services. Pure helpers build everywhere; OS services are Windows-only.
 #[cfg(windows)]

@@ -105,6 +105,16 @@ pub struct Args {
     pub settings: bool,
     /// `--widget-mcp`: serve the widget pages as an MCP server over stdio (for Hermes).
     pub widget_mcp: bool,
+    /// `--install` (or a `...-Setup.exe` name): the per-user installer.
+    pub install: bool,
+    /// `--uninstall`: remove the app.
+    pub uninstall: bool,
+    /// `--update-handoff`: run as the update helper.
+    pub update_handoff: bool,
+    /// `--self-test`: quick health check, exit code 0 when healthy.
+    pub self_test: bool,
+    /// `--update-started <token>`: the update helper waits for this app to acknowledge.
+    pub update_started: Option<String>,
 }
 
 impl Args {
@@ -114,8 +124,16 @@ impl Args {
         S: AsRef<str>,
     {
         let mut parsed = Args::default();
-        for arg in args {
+        let mut args = args.into_iter().peekable();
+        while let Some(arg) = args.next() {
             match arg.as_ref() {
+                "--install" => parsed.install = true,
+                "--uninstall" => parsed.uninstall = true,
+                "--update-handoff" => parsed.update_handoff = true,
+                "--self-test" => parsed.self_test = true,
+                "--update-started" => {
+                    parsed.update_started = args.peek().map(|v| v.as_ref().to_owned());
+                }
                 "--exit" => parsed.exit = true,
                 "--background" => parsed.background = true,
                 "--settings" => parsed.settings = true,
@@ -339,18 +357,34 @@ mod os {
         quit: bool,
         settings_window: Option<SettingsHost>,
         welcome_window: Option<SettingsHost>,
+        updates: crate::update::UpdateService,
     }
 
     impl App {
         /// Runs the whole application and returns the process exit code.
         pub fn run() -> i32 {
-            let args = Args::parse(std::env::args().skip(1));
+            let raw: Vec<String> = std::env::args().skip(1).collect();
+            let args = Args::parse(&raw);
             if args.widget_mcp {
                 return crate::widget_bridge::run_stdio();
+            }
+            if args.update_handoff {
+                return crate::update::os::run_helper();
             }
             if args.exit {
                 instance::signal_exit();
                 return 0;
+            }
+            if args.self_test {
+                return crate::selftest::run(&raw);
+            }
+            let setup_named = std::env::current_exe()
+                .is_ok_and(|exe| crate::install::is_setup_name(&exe.to_string_lossy()));
+            if args.install || setup_named {
+                return crate::install::run(&raw);
+            }
+            if args.uninstall {
+                return crate::uninstall::run(&raw);
             }
             // SAFETY: process-wide setup before any window exists. The manifest already asks for
             // PerMonitorV2; this covers launchers that strip it (failure is harmless).
@@ -426,6 +460,18 @@ mod os {
             overlay.attach_window(window.hwnd());
             let surface: Box<dyn Surface> = Box::new(overlay);
             let tray = Tray::new(host, TOOLTIP);
+            let updates = {
+                let tx = tx.clone();
+                let waker = make_waker(host, wake_pending.clone());
+                crate::update::os::new_service(
+                    store.clone(),
+                    Arc::new(move || {
+                        let _ = tx.send(HostEvent::UpdateChanged);
+                        waker();
+                    }),
+                )
+            };
+            updates.set_language(&settings.ui_language);
             let timer = AnimationTimer::new()?;
 
             let mut app = App {
@@ -457,6 +503,7 @@ mod os {
                 quit: false,
                 settings_window: None,
                 welcome_window: None,
+                updates,
             };
             app.canvas.release();
             app.apply_settings();
@@ -475,6 +522,14 @@ mod os {
             if app.args.settings {
                 app.open_settings(None);
             }
+            if let Some(token) = app.args.update_started.clone() {
+                crate::update::os::signal_started(&["--update-started".to_owned(), token]);
+            }
+            app.updates.check(
+                false,
+                app.settings.auto_check_updates,
+                app.settings.auto_download_updates,
+            );
             Ok(app)
         }
 
@@ -518,13 +573,17 @@ mod os {
 
         fn host_info(&self) -> naby_ui::settings::HostInfo {
             let dock = self.monitor_index().and_then(|i| self.monitors.get(i));
-            settings_host::host_info(
+            let mut info = settings_host::host_info(
                 &self.settings,
                 &self.monitors,
                 self.hotkeys.status_lines(&self.settings),
                 &self.store.dir().to_string_lossy(),
                 dock,
-            )
+            );
+            let platform = naby_core::updates::Platform::current().map_or("", |p| p.rid);
+            info.update =
+                crate::update::to_info(&self.updates.view(), env!("CARGO_PKG_VERSION"), platform);
+            info
         }
 
         /// Opens Settings (or raises it) at an optional page.
@@ -641,14 +700,116 @@ mod os {
                     }
                 }
                 R::ShowWelcome => self.open_welcome(),
-                R::Update(_) | R::OpenUninstaller => self.notify(
-                    "Updates",
-                    "Updates and uninstall are handled by the NabyScape setup in this build.",
-                ),
+                R::Update(action) => self.update_action(action),
+                R::OpenUninstaller => self.open_uninstaller(),
                 R::PreviewCompletionSound
                 | R::PickFile(_)
                 | R::PickInstalledApp
                 | R::RefreshDiagnostics => {}
+            }
+        }
+
+        /// Settings > Updates buttons.
+        fn update_action(&mut self, action: naby_core::command::UpdateAction) {
+            use naby_core::command::UpdateAction as U;
+            match action {
+                U::Check => {
+                    self.updates.check(true, true, false);
+                }
+                U::Download => {
+                    self.updates.download();
+                }
+                U::Cancel => self.updates.cancel(),
+                U::ReleaseNotes => {
+                    if let Err(error) = crate::shell::open_url(&self.updates.notes_url()) {
+                        self.notify("Updates", &error.to_string());
+                    }
+                }
+                U::Install => self.begin_handoff(false),
+                U::RestorePrevious => self.begin_handoff(true),
+            }
+        }
+
+        /// Saves the documents, prepares the update helper on a worker thread and quits once it
+        /// confirmed (C# `UpdateHandoff.Prepare`).
+        fn begin_handoff(&mut self, restore: bool) {
+            if !crate::update::handoff::try_begin() {
+                return;
+            }
+            let backup = self.store.save("preference-backup", &self.settings);
+            let saved = self.store.save_settings(&self.settings);
+            if let Err(error) = backup.and(saved) {
+                crate::update::handoff::end();
+                self.store.log(&format!("{error:?}"));
+                self.updates
+                    .set_status(&format!("Update failed: {error:?}"));
+                return;
+            }
+            let tx = self.tx.clone();
+            let waker = self.waker();
+            let started = self.updates.spawn_exclusive(move |service| {
+                let result = crate::update::os::prepare_handoff(service, restore);
+                crate::update::handoff::end();
+                match result {
+                    Ok(()) => {
+                        let _ = tx.send(HostEvent::Quit);
+                        waker();
+                    }
+                    Err(error) => service.set_status(&error.to_string()),
+                }
+            });
+            if started.is_none() {
+                crate::update::handoff::end();
+            }
+        }
+
+        /// New update state: notices for the dock and a refresh of Settings.
+        fn updates_changed(&mut self) {
+            for event in self.updates.take_events() {
+                let (title, detail) = match event {
+                    crate::update::UpdateEvent::Available(release) => (
+                        "Update available".to_owned(),
+                        format!(
+                            "{} \u{b7} Open Settings > Application to review.",
+                            release.version
+                        ),
+                    ),
+                    crate::update::UpdateEvent::DownloadReady => (
+                        "Update ready to install".to_owned(),
+                        "Open Settings > Application to install and restart when ready.".to_owned(),
+                    ),
+                };
+                let changed = self.surface.run_command(Command::Notify {
+                    kind: naby_core::notifications::NoticeKind::Updates,
+                    title,
+                    detail,
+                    files: None,
+                });
+                self.after_surface(changed);
+            }
+            if self.settings_window.is_some() {
+                let _ = self.tx.send(HostEvent::AuxInput(AuxWindow::Settings));
+            }
+        }
+
+        /// Settings > Uninstall: only an installed copy can; a portable copy explains itself.
+        fn open_uninstaller(&mut self) {
+            let installed =
+                std::env::current_exe().is_ok_and(|exe| crate::install::is_installed(&exe));
+            if !installed {
+                self.notify(
+                    "Uninstall",
+                    "This is a portable copy. Remove its folder, or use Windows Installed apps for the installed copy.",
+                );
+                return;
+            }
+            let result = std::env::current_exe()
+                .and_then(|exe| std::process::Command::new(exe).arg("--uninstall").spawn());
+            if let Err(error) = result {
+                self.notify(
+                    "Uninstall",
+                    &format!("Could not open the uninstaller: {error}"),
+                );
             }
         }
 
@@ -762,6 +923,7 @@ mod os {
                     }
                 },
                 HostEvent::Quit => self.quit = true,
+                HostEvent::UpdateChanged => self.updates_changed(),
                 HostEvent::DisplayChanged => {
                     self.monitors = enumerate();
                     self.followed = self
@@ -867,6 +1029,7 @@ mod os {
             self.hotkeys.configure(self.host, &self.settings);
             self.window.set_opacity(self.settings.opacity as f32);
             self.surface.apply_settings(&self.settings);
+            self.updates.set_language(&self.settings.ui_language);
             self.assistant.apply_settings(&self.settings);
             let wants_hooks = self.settings.hide_fullscreen || self.settings.hide_maximized;
             if wants_hooks && self.hooks.is_none() {
@@ -1091,9 +1254,19 @@ mod tests {
                 exit: false,
                 background: true,
                 settings: true,
-                widget_mcp: false
+                ..Args::default()
             }
         );
+        let modes = Args::parse([
+            "--install",
+            "--uninstall",
+            "--update-handoff",
+            "--self-test",
+            "--update-started",
+            "tok",
+        ]);
+        assert!(modes.install && modes.uninstall && modes.update_handoff && modes.self_test);
+        assert_eq!(modes.update_started.as_deref(), Some("tok"));
         assert!(Args::parse(["--widget-mcp"]).widget_mcp);
         assert!(Args::parse(["--exit"]).exit);
         assert_eq!(Args::parse(Vec::<String>::new()), Args::default());
