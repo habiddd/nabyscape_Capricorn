@@ -6,9 +6,15 @@ edition.workspace = true
 license.workspace = true
 build = "build.rs"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "nabyscape"
 path = "src/main.rs"
+
+[build-dependencies]
+embed-resource = "3"
 
 [dependencies]
 naby-core.workspace = true
@@ -37,3 +43,6 @@ windows = { version = "0.61", features = [
   "Foundation", "Foundation_Collections", "Media_Control", "Storage_Streams", "Media_SpeechRecognition",
   "Media_SpeechSynthesis", "Globalization", "ApplicationModel", "Win32_System_Rpc",
 ] }
+
+[dev-dependencies]
+tempfile.workspace = true
