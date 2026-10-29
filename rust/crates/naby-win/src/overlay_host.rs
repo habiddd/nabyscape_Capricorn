@@ -911,6 +911,8 @@ mod os {
                 }
                 Command::ApplySettings(settings) => self.apply_command_settings(*settings),
                 Command::SetDockEditing(_) => {}
+                // Settings-window requests are handled by the settings host.
+                Command::Settings(_) => {}
 
                 Command::MediaToggle => self.with_media(|m| m.toggle()),
                 Command::MediaPlay => self.with_media(|m| m.play()),
@@ -1242,6 +1244,17 @@ mod os {
 
         fn on_hide(&mut self) {
             self.overlay.on_hide();
+        }
+
+        fn snapshots(&self) -> Option<Snapshots> {
+            Some(self.snaps.clone())
+        }
+
+        fn run_command(&mut self, command: Command) -> bool {
+            self.out.push(command);
+            let changed = self.execute_pending();
+            self.reconcile_demand();
+            changed
         }
 
         fn take_actions(&mut self) -> Vec<ShellAction> {

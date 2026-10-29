@@ -160,4 +160,62 @@ pub enum Command {
     WeatherRefresh {
         force: bool,
     },
+
+    // ---- settings and welcome windows ---------------------------------------------------
+    /// Something only the settings host can do (file dialogs, startup entry, updates).
+    Settings(SettingsRequest),
+}
+
+/// What a file dialog is for (the host picks title, filter and open/save/folder mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FilePurpose {
+    /// Open a layout profile (`*.json`).
+    ImportLayout,
+    /// Save a layout profile (`NabyScape-layout.json`).
+    ExportLayout,
+    /// Open a completion sound (`*.wav`).
+    CompletionSound,
+    /// Choose the folder watched for download arrivals.
+    DownloadsFolder,
+    /// Choose a file for a new shortcut.
+    ShortcutFile,
+    /// Choose a folder for a new shortcut.
+    ShortcutFolder,
+    /// Save the private diagnostics report (`NabyScape-diagnostics.json`).
+    DiagnosticsExport,
+    /// Open a timed lyrics file (`*.lrc`) for the current track.
+    LyricsFile,
+}
+
+/// Update actions requested from Settings > General.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateAction {
+    Check,
+    Download,
+    Cancel,
+    Install,
+    RestorePrevious,
+    ReleaseNotes,
+}
+
+/// Requests from the settings window to its host. Results come back through
+/// `SettingsView::file_picked` / `SettingsView::set_host_info`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingsRequest {
+    /// Show a file or folder dialog; the answer is `SettingsView::file_picked(purpose, path)`.
+    PickFile(FilePurpose),
+    /// Add or remove the Windows sign-in startup entry.
+    SetAutoStart(bool),
+    Update(UpdateAction),
+    /// Open the uninstaller.
+    OpenUninstaller,
+    /// Play the configured completion sound once.
+    PreviewCompletionSound,
+    /// Rebuild the private diagnostics report preview.
+    RefreshDiagnostics,
+    /// Open the setup guide (welcome window).
+    ShowWelcome,
+    /// List the installed apps for "Add installed app"; they arrive through
+    /// `SettingsView::set_host_info` (`HostInfo::installed_apps`).
+    PickInstalledApp,
 }

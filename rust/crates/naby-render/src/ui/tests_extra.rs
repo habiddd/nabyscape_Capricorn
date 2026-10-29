@@ -167,3 +167,29 @@ fn overlay_snapshot_shows_open_popup_over_later_widgets() {
         fill
     );
 }
+
+#[test]
+fn dpi_scale_keeps_layout_logical_and_restores_canvas_scale() {
+    use crate::{Canvas, Fonts, Rect, Theme};
+    let fonts = Fonts::load_system();
+    let input = InputState::default();
+    let mut mem = UiMemory::new();
+    let mut heights = Vec::new();
+    for scale in [1.0f32, 2.0] {
+        let theme = Theme::default().with_dpi(scale);
+        let mut canvas = Canvas::new((300.0 * scale) as u32, (200.0 * scale) as u32);
+        let mut v = true;
+        {
+            let area = Rect::new(0.0, 0.0, 300.0, 200.0);
+            let mut ui = Ui::new(&mut canvas, &fonts, &theme, &input, &mut mem, area);
+            heights.push(ui.toggle(&mut v, "Switch").rect.h);
+        }
+        assert_eq!(canvas.scale(), 1.0);
+        let x = canvas.width() - (20.0 * scale) as u32;
+        assert!(
+            (0..canvas.height()).any(|y| canvas.pixel(x, y).a > 0),
+            "track painted at scale {scale}"
+        );
+    }
+    assert_eq!(heights[0], heights[1]);
+}

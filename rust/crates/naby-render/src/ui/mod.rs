@@ -10,6 +10,7 @@
 //! one-shot timer for caret blink, scrollbar fade or a tooltip).
 
 mod color_picker;
+mod custom;
 mod extras;
 mod input;
 mod scroll;
@@ -270,6 +271,7 @@ pub(crate) struct ScrollCtx {
 /// One frame of widgets. See the module docs.
 pub struct Ui<'a> {
     pub(crate) canvas: &'a mut Canvas,
+    prev_scale: f32,
     pub(crate) fonts: &'a Fonts,
     pub(crate) theme: &'a Theme,
     pub(crate) input: &'a InputState,
@@ -303,10 +305,13 @@ impl<'a> Ui<'a> {
             memory.focus_visible = true;
         }
         memory.repaint_after = None;
+        let prev_scale = canvas.scale();
+        canvas.set_scale(theme.dpi_scale);
         let mut root = Layout::new(Dir::Column, area);
         root.spacing = 8.0;
         Ui {
             canvas,
+            prev_scale,
             fonts,
             theme,
             input,
@@ -809,6 +814,7 @@ impl<'a> Ui<'a> {
 impl Drop for Ui<'_> {
     fn drop(&mut self) {
         self.end_frame();
+        self.canvas.set_scale(self.prev_scale);
     }
 }
 

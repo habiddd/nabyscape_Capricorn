@@ -246,6 +246,8 @@ pub struct Canvas {
     mask_pool: Vec<Mask>,
     alpha: f32,
     scratch: Vec<u8>,
+    /// Logical-to-physical scale applied to every drawing call (1.0 = pixels).
+    scale: f32,
 }
 
 impl Canvas {
@@ -257,6 +259,31 @@ impl Canvas {
             mask_pool: Vec::new(),
             alpha: 1.0,
             scratch: Vec::new(),
+            scale: 1.0,
+        }
+    }
+
+    /// The logical-to-physical scale (see [`Canvas::set_scale`]).
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// Makes every drawing call take logical coordinates that are multiplied by `scale`
+    /// (shapes, strokes, clips, images, blur and text sizes). `bounds()` then reports the
+    /// logical size. Used by the DPI-aware widget toolkit; 1.0 is the default.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.scale = if scale.is_finite() {
+            scale.clamp(0.5, 8.0)
+        } else {
+            1.0
+        };
+    }
+
+    fn scale_transform(&self, t: Transform) -> Transform {
+        if self.scale == 1.0 {
+            t
+        } else {
+            t.post_scale(self.scale, self.scale)
         }
     }
 
@@ -269,8 +296,14 @@ impl Canvas {
     pub fn size(&self) -> (u32, u32) {
         (self.width(), self.height())
     }
+    /// The drawable area in logical units (equals the pixel size at scale 1).
     pub fn bounds(&self) -> Rect {
-        Rect::new(0.0, 0.0, self.width() as f32, self.height() as f32)
+        Rect::new(
+            0.0,
+            0.0,
+            self.width() as f32 / self.scale,
+            self.height() as f32 / self.scale,
+        )
     }
     /// Bytes currently held by the pixel buffer, masks and scratch space.
     pub fn memory_bytes(&self) -> usize {
@@ -347,14 +380,15 @@ impl Canvas {
             .pop()
             .or_else(|| Mask::new(w, h))
             .expect("mask");
+        let t = self.scale_transform(Transform::identity());
         match path {
             Some(path) => {
                 if let Some(prev) = self.clips.last() {
                     mask.data_mut().copy_from_slice(prev.data());
-                    mask.intersect_path(path, FillRule::Winding, true, Transform::identity());
+                    mask.intersect_path(path, FillRule::Winding, true, t);
                 } else {
                     mask.clear();
-                    mask.fill_path(path, FillRule::Winding, true, Transform::identity());
+                    mask.fill_path(path, FillRule::Winding, true, t);
                 }
             }
             None => mask.clear(),
@@ -421,6 +455,7 @@ impl Canvas {
 
     pub fn fill_path_with(&mut self, path: &Path, fill: &Fill, rule: FillRule, t: Transform) {
         let paint = make_paint(fill, self.alpha);
+        let t = self.scale_transform(t);
         self.pixmap
             .fill_path(path, &paint, rule, t, self.clips.last());
     }
@@ -434,6 +469,7 @@ impl Canvas {
             line_join: LineJoin::Round,
             ..Stroke::default()
         };
+        let t = self.scale_transform(t);
         self.pixmap
             .stroke_path(path, &paint, &stroke, t, self.clips.last());
     }
@@ -446,6 +482,9 @@ impl Canvas {
         if dst.is_empty() {
             return;
         }
+        let k = self.scale;
+        let dst = Rect::new(dst.x * k, dst.y * k, dst.w * k, dst.h * k);
+        let radius = radius * k;
         let t = Transform::from_row(
             dst.w / img.width() as f32,
             0.0,
@@ -486,6 +525,9 @@ impl Canvas {
     /// Box blur applied three times (a close Gaussian approximation) to `region`.
     /// Ignores clips and opacity; used for frosted panels behind content.
     pub fn blur(&mut self, region: Rect, radius: f32) {
+        let k = self.scale;
+        let region = Rect::new(region.x * k, region.y * k, region.w * k, region.h * k);
+        let radius = radius * k;
         let each = (radius / 3.0)
             .round()
             .max(if radius >= 1.0 { 1.0 } else { 0.0 }) as usize;

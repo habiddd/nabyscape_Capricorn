@@ -65,6 +65,14 @@ pub trait Surface {
     }
     /// The window was hidden: drop caches.
     fn on_hide(&mut self) {}
+    /// The live snapshots the auxiliary windows (Settings) read, when the surface has them.
+    fn snapshots(&self) -> Option<naby_ui::host::Snapshots> {
+        None
+    }
+    /// Runs a command another window produced (media, timers, notices, ...). True = repaint.
+    fn run_command(&mut self, _command: naby_core::command::Command) -> bool {
+        false
+    }
     /// Things only the app shell can do (settings window, tray balloons, quit).
     fn take_actions(&mut self) -> Vec<ShellAction> {
         Vec::new()
@@ -128,7 +136,7 @@ pub use os::{App, HostHandle};
 #[cfg(windows)]
 mod os {
     use super::*;
-    use crate::event::{HostEvent, WM_APP_TRAY, WM_APP_WAKE};
+    use crate::event::{AuxWindow, HostEvent, WM_APP_TRAY, WM_APP_WAKE};
     use crate::fullscreen::{foreground_should_hide, ForegroundHooks};
     use crate::hotkeys::{HotkeyAction, Hotkeys};
     use crate::instance::{self, Acquire, Instance};
@@ -137,14 +145,19 @@ mod os {
     };
     use crate::outside_click::OutsideClickHook;
     use crate::overlay_host::{display_info, OverlayHost};
+    use crate::settings_host::{self, AuxContent, SettingsHost, SettingsOutput};
     use crate::startup;
     use crate::timer::AnimationTimer;
     use crate::tray::{Tray, TrayCommand, WakeMenu, TOOLTIP};
     use crate::wake::Waker;
     use crate::window::{ensure_class, set_user_data, user_data, LayeredWindow};
     use naby_core::color::Rgba;
+    use naby_core::command::Command;
     use naby_core::settings::DisplayMode;
     use naby_ui::host::Signal;
+    use naby_ui::settings::bounds::Bounds;
+    use naby_ui::settings::SettingsView;
+    use naby_ui::welcome::{WelcomeDone, WelcomeView};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::Arc;
@@ -304,6 +317,8 @@ mod os {
         /// Where the dock window is on screen (outside-click hit testing).
         window_origin: (i32, i32),
         quit: bool,
+        settings_window: Option<SettingsHost>,
+        welcome_window: Option<SettingsHost>,
     }
 
     impl App {
@@ -342,6 +357,7 @@ mod os {
 
         fn new(args: Args, instance: Instance) -> windows::core::Result<App> {
             let store = Arc::new(Store::open_default());
+            let existing_profile = store.dir().join("settings.json").exists();
             let (mut settings, warning) = load_settings(&store);
             settings.auto_start = startup::enabled();
 
@@ -414,6 +430,8 @@ mod os {
                 follow_due: Instant::now(),
                 window_origin: (0, 0),
                 quit: false,
+                settings_window: None,
+                welcome_window: None,
             };
             app.canvas.release();
             app.apply_settings();
@@ -426,8 +444,11 @@ mod os {
                     "Click the island for your widgets. Right-click the tray icon for settings.",
                 );
             }
+            if naby_core::settings::welcome::should_offer_stored(&app.store, existing_profile) {
+                app.open_welcome();
+            }
             if app.args.settings {
-                app.open_settings();
+                app.open_settings(None);
             }
             Ok(app)
         }
@@ -450,12 +471,179 @@ mod os {
             self.tray.balloon(title, detail);
         }
 
-        fn open_settings(&self) {
-            // The Settings window is a later task; tell the user instead of doing nothing.
-            self.notify(
-                "Settings",
-                "The settings window is not part of this build of the new shell yet.",
+        /// The work area and scale of the monitor the pointer is on (where windows open).
+        fn work_near_cursor(&self) -> (Bounds, f64) {
+            let m = cursor_pos()
+                .and_then(|(x, y)| monitor_at(&self.monitors, x, y))
+                .or_else(|| self.monitor_index())
+                .and_then(|i| self.monitors.get(i));
+            match m {
+                Some(m) => (
+                    Bounds::new(
+                        f64::from(m.work.left),
+                        f64::from(m.work.top),
+                        f64::from(m.work.width()),
+                        f64::from(m.work.height()),
+                    ),
+                    f64::from(m.scale()),
+                ),
+                None => (Bounds::new(0.0, 0.0, 1280.0, 720.0), 1.0),
+            }
+        }
+
+        fn host_info(&self) -> naby_ui::settings::HostInfo {
+            let dock = self.monitor_index().and_then(|i| self.monitors.get(i));
+            settings_host::host_info(
+                &self.settings,
+                &self.monitors,
+                self.hotkeys.status_lines(&self.settings),
+                &self.store.dir().to_string_lossy(),
+                dock,
+            )
+        }
+
+        /// Opens Settings (or raises it) at an optional page.
+        fn open_settings(&mut self, page: Option<String>) {
+            if let Some(window) = &mut self.settings_window {
+                if let (Some(p), Some(view)) = (&page, window.settings_view()) {
+                    view.open_page(p);
+                }
+                window.raise();
+                let _ = self.tx.send(HostEvent::AuxInput(AuxWindow::Settings));
+                return;
+            }
+            let mut view = SettingsView::new(self.settings.clone(), Some(self.store.clone()));
+            if let Some(p) = &page {
+                view.open_page(p);
+            }
+            let (work, scale) = self.work_near_cursor();
+            let info = self.host_info();
+            self.settings_window = SettingsHost::open(
+                AuxWindow::Settings,
+                AuxContent::Settings(Box::new(view)),
+                self.store.clone(),
+                self.tx.clone(),
+                work,
+                scale,
             );
+            if let Some(window) = &mut self.settings_window {
+                window.set_info(info);
+                window.raise();
+            }
+        }
+
+        /// Opens the first-run guide (or raises it).
+        fn open_welcome(&mut self) {
+            if let Some(window) = &self.welcome_window {
+                window.raise();
+                return;
+            }
+            let view = WelcomeView::new(self.settings.clone(), Some(self.store.clone()));
+            let (work, scale) = self.work_near_cursor();
+            self.welcome_window = SettingsHost::open(
+                AuxWindow::Welcome,
+                AuxContent::Welcome(Box::new(view)),
+                self.store.clone(),
+                self.tx.clone(),
+                work,
+                scale,
+            );
+            if let Some(window) = &self.welcome_window {
+                window.raise();
+            }
+        }
+
+        /// Runs a frame of an auxiliary window and carries out what it asked for.
+        fn pump_aux(&mut self, which: AuxWindow) {
+            let snaps = self.surface.snapshots();
+            let info = self.host_info();
+            let outputs = {
+                let slot = match which {
+                    AuxWindow::Settings => &mut self.settings_window,
+                    AuxWindow::Welcome => &mut self.welcome_window,
+                };
+                let Some(window) = slot else { return };
+                window.set_info(info);
+                window.pump(snaps)
+            };
+            for output in outputs {
+                match output {
+                    SettingsOutput::Apply(settings) => {
+                        let mut next = *settings;
+                        next.normalize();
+                        let ok = match self.store.save_settings(&next) {
+                            Ok(()) => true,
+                            Err(error) => {
+                                self.store.log(&error);
+                                false
+                            }
+                        };
+                        self.settings = next;
+                        self.apply_settings();
+                        if let Some(window) = &mut self.settings_window {
+                            window.saved(ok);
+                        }
+                    }
+                    SettingsOutput::WelcomeDone(done) => {
+                        self.welcome_window = None;
+                        // The guide saved its choices itself; reload them into the shell.
+                        let (mut loaded, _) = load_settings(&self.store);
+                        loaded.auto_start = self.settings.auto_start;
+                        self.settings = loaded;
+                        self.apply_settings();
+                        if matches!(done, WelcomeDone::Finished { setup_ai: true }) {
+                            self.notify(
+                                "Assistant",
+                                "The assistant is not part of this build of the new shell yet.",
+                            );
+                        }
+                    }
+                    SettingsOutput::Request(request) => self.settings_request(request),
+                    SettingsOutput::Command(command) => self.aux_command(command),
+                }
+            }
+        }
+
+        fn settings_request(&mut self, request: naby_core::command::SettingsRequest) {
+            use naby_core::command::SettingsRequest as R;
+            match request {
+                R::SetAutoStart(on) => {
+                    if let Err(error) = startup::set(on) {
+                        self.store.log(&error);
+                        self.settings.auto_start = startup::enabled();
+                        self.notify("Startup", &format!("Could not change startup: {error}"));
+                        let _ = self.store.save_settings(&self.settings);
+                    }
+                }
+                R::ShowWelcome => self.open_welcome(),
+                R::Update(_) | R::OpenUninstaller => self.notify(
+                    "Updates",
+                    "Updates and uninstall are handled by the NabyScape setup in this build.",
+                ),
+                R::PreviewCompletionSound
+                | R::PickFile(_)
+                | R::PickInstalledApp
+                | R::RefreshDiagnostics => {}
+            }
+        }
+
+        fn aux_command(&mut self, command: Command) {
+            match command {
+                Command::Quit => self.quit = true,
+                Command::OpenAssistant | Command::OpenVoice => self.notify(
+                    "Assistant",
+                    "The assistant is not part of this build of the new shell yet.",
+                ),
+                Command::OpenSettings => self.open_settings(None),
+                Command::OpenSettingsPage(page) => self.open_settings(Some(page)),
+                Command::CopyText(text) => {
+                    let _ = crate::text_clipboard::set_text(None, &text);
+                }
+                other => {
+                    let changed = self.surface.run_command(other);
+                    self.after_surface(changed);
+                }
+            }
         }
 
         // ---- message loop -------------------------------------------------------------
@@ -527,7 +715,17 @@ mod os {
                     }
                 }
                 HostEvent::TaskbarCreated => self.tray.readd(),
-                HostEvent::TrayActivated | HostEvent::OpenSettings => self.open_settings(),
+                HostEvent::TrayActivated | HostEvent::OpenSettings => self.open_settings(None),
+                HostEvent::AuxInput(which) => self.pump_aux(which),
+                HostEvent::AuxClosed(which) => match which {
+                    AuxWindow::Settings => self.settings_window = None,
+                    AuxWindow::Welcome => {
+                        if self.welcome_window.take().is_some() {
+                            // Closing the guide without a choice counts as skipping it.
+                            let _ = naby_core::settings::welcome::complete(&self.store);
+                        }
+                    }
+                },
                 HostEvent::Quit => self.quit = true,
                 HostEvent::DisplayChanged => {
                     self.monitors = enumerate();
@@ -575,7 +773,7 @@ mod os {
         fn tray_command(&mut self, command: TrayCommand) {
             match command {
                 TrayCommand::OpenIsland => self.signal(Signal::Panel),
-                TrayCommand::Settings => self.open_settings(),
+                TrayCommand::Settings => self.open_settings(None),
                 TrayCommand::HideShow => self.signal(Signal::ToggleVisibility),
                 TrayCommand::Tuck => self.signal(Signal::ToggleTuck),
                 TrayCommand::Quit => self.quit = true,
@@ -651,7 +849,7 @@ mod os {
         fn after_surface(&mut self, changed: bool) {
             for action in self.surface.take_actions() {
                 match action {
-                    ShellAction::OpenSettings(_) => self.open_settings(),
+                    ShellAction::OpenSettings(page) => self.open_settings(page),
                     ShellAction::Quit => self.quit = true,
                     ShellAction::Balloon { title, detail } => self.notify(&title, &detail),
                     ShellAction::OpenAssistant | ShellAction::OpenVoice => self.notify(

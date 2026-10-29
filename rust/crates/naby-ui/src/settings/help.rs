@@ -1,0 +1,121 @@
+//! One-sentence explanations shown under and as tooltips for settings (C# `SettingsHelp.cs`).
+
+const DESCRIPTIONS: &[(&str, &str)] = &[
+    ("Show ambience on closed dock", "Show ambient light on the compact dock during music, voice, countdowns or notifications. Idle and tucked docks stay black. The main ambient switch must also be on."),
+    ("Ambient light", "Add soft colored light behind your widgets."),
+    ("Ambient intensity", "Set the brightest the light can be. Music can make it pulse below this level."),
+    ("Ambient sensitivity", "Amplifies the visual response to measured media audio without changing playback volume. 100% uses the original level."),
+    ("Ambient spread", "Make the light fill more or less of the panel."),
+    ("Notification lifetime", "Time before an unopened indicator expires. Open details and active interaction pause expiry."),
+    ("Scheduled quiet hours", "Silences Naby notifications and completion sounds during the selected local hours."),
+    ("Stopwatch", "Tracks elapsed time in Focus with Start, Pause, Resume and Reset. Sleep is counted; the same saved session appears in hover and detached previews."),
+    ("Display mode", "Primary stays on the main display. Selected uses your saved display. Follow cursor waits 250 ms on another display and defers during island interaction."),
+    ("Notification delivery", "Notch uses a compact indicator. Windows uses a tray notification. Both sends each once; Off suppresses all. A manually hidden island uses Windows fallback."),
+    ("Infer completed arrivals in a download folder", "Opt-in folder watcher: ignores existing files and waits for a readable final name with stable size for two seconds. It cannot prove browser completion."),
+    ("Always tucked", "Keeps a small top edge visible until you hover; for example keep music out of the way while working."),
+    ("Tucked edge height", "Choose 0–12 layout pixels. Zero hides the dock completely; screen-edge hover and the tuck shortcut bring it back."),
+    ("Enable tuck shortcut", "Ctrl+Alt+T tucks the island; press again to release the manual latch to automatic rules."),
+    ("Black glass", "Adds a dark gradient and soft reflections to the island."),
+    ("Color from album artwork", "Tints the open media panel using the current cover."),
+    ("Bold media titles", "Uses heavier text for song titles, including the closed island."),
+    ("Bold panel and tool headings", "Uses heavier text for section titles without changing song titles."),
+    ("Compact panel with tabs", "Shows one category at a time. Turn off to show the widget layout."),
+    ("Preview on hover", "Rest your pointer on the island to browse without opening a panel."),
+    ("Two-stage reveal", "Shows a small preview first, then more detail after a short delay."),
+    ("Live activity · audio, progress & focus breathing", "Animates measured audio levels and running sessions. Stops rendering while hidden."),
+    ("Feedback for volume & audio device changes", "Briefly shows changes made with Windows audio controls."),
+    ("Reduce motion", "Stops continuous animation and removes animated transitions."),
+    ("Enable visibility shortcut", "Hides the entire island or brings it back. The tray can always restore it."),
+    ("Enable open / close hotkey", "Opens or closes the panel from another app without clicking the island."),
+    ("Gentle waveform motion during quiet playback", "Adds subtle decorative motion when the selected media app reports silence."),
+    ("Closed-island volume indicator", "Shows an icon and level briefly after the Windows volume changes."),
+    ("Closed-island brightness indicator", "Shows brightness changes only on displays supported by Windows."),
+    ("Preview new tracks & sessions ending soon", "Briefly reveals new songs and upcoming timer or focus endings."),
+    ("Save text & image history locally", "Captures new clipboard items on this PC. Turning it off clears saved history."),
+    ("Network transfer rates", "Shows current upload and download speeds in the Network tab."),
+    ("Storage capacity", "Shows used and free space for available drives in the Storage tab."),
+    ("Processes by memory", "Lists running processes by RAM usage in the Processes tab."),
+    ("24-hour clock", "Uses 18:30 instead of 6:30 PM."),
+    ("Show seconds in Status", "Includes seconds in the clock on the Status page."),
+    ("Show date", "Includes the local date beside the Status clock."),
+    ("Tuck above fullscreen apps", "Leaves a small edge on this display. Hover over it to reveal NabyScape."),
+    ("Tuck above maximized apps", "Tucks NabyScape when a window fills this display, even outside fullscreen."),
+    ("Closed width", "Width of the island before hovering or opening it."),
+    ("Closed height", "Height of the island before hovering or opening it."),
+    ("Corner radius", "Roundness of the pill corners. The notch keeps its attached top edge."),
+    ("Horizontal position", "0% aligns left, 50% centers, and 100% aligns right on the chosen display."),
+    ("Top offset", "Gap between the pill and the top edge of the screen."),
+    ("Panel width", "Width of the panel after clicking the island."),
+    ("Maximum panel height", "Limits panel height. Longer content scrolls inside it."),
+    ("Content inset", "Space between the open panel edge and its controls."),
+    ("Content size", "Scales panel text and controls together. Larger sizes may require scrolling."),
+    ("Section spacing", "Space between groups of controls in the open panel."),
+    ("Preview width", "Width of the preview that appears on hover."),
+    ("Preview height", "Maximum height of the detailed hover preview."),
+    ("Hover delay", "How long the pointer must rest on NabyScape before a preview appears."),
+    ("Detail delay", "How long the first stage stays visible before showing more detail."),
+    ("Swipe distance", "Drag distance needed to switch to the next preview."),
+    ("Volume step", "Percentage changed by each wheel step when the closed-island action is Volume."),
+    ("Animation duration", "Time for transitions. Lower values feel faster; zero removes transitions."),
+    ("Glass intensity", "Strength of the dark reflections and gradient, separate from opacity."),
+    ("Opacity", "Overall visibility of the island. 100% keeps the surface fully opaque."),
+    ("Focus duration", "Length of the next work session. Does not change an active session."),
+    ("Break duration", "Length of the next break after a work session."),
+    ("Media", "Shows song artwork, playback controls and media-session selection."),
+    ("Volume", "Shows the Windows master volume and access to the app mixer."),
+    ("Timer", "Adds a countdown with pause, reset and completion notifications."),
+    ("Focus mode", "Adds work and break sessions using your chosen durations."),
+    ("Clock & date", "Shows local time and date in Status."),
+    ("System monitor", "Shows CPU, RAM and detailed hardware, network, storage and process views."),
+    ("Battery", "Shows charge and charging state. Hidden automatically on PCs without a battery."),
+    ("Shortcuts", "Shows your saved apps, folders, files and websites in Launch."),
+    ("Everyday tools", "Adds File shelf, Notes, Clipboard, Calendar, Keep awake and Clean links."),
+    ("Swipe between open panels", "Swipe sideways, use horizontal trackpad scrolling or Shift+wheel to change panels."),
+    ("Reveal shelf when dragging files", "Shows a drop target when files reach the island. Originals stay in place."),
+    ("Allow detachable previews", "Drag the preview grip out to open a small movable window with the same data."),
+    ("Control playback from album cover", "Click the closed cover to play or pause. Hold it to choose a media app."),
+    ("Closed media icon", "Choose an audio indicator, album cover or None at the left of the island."),
+    ("Closed media content", "Choose waveform, synced lyrics, song title or None for the closed dock."),
+    ("Performance profile", "Auto follows the display; Eco uses fewer frames; Maximum favors smooth motion."),
+    ("Island display", "Choose the monitor for the island. Disconnected displays fall back to the primary screen."),
+    ("Wheel action", "Choose what the wheel does while the island is closed. Hover still browses previews."),
+    ("Middle-click action", "Choose play/pause, microphone mute or no action for the middle mouse button."),
+    ("Hotkey modifiers", "First keys of the shortcut that opens or closes the panel."),
+    ("Hotkey key", "Letter to press with the modifier keys to open or close the panel."),
+    ("Visibility hotkey modifiers", "First keys of the shortcut that hides or restores the entire island."),
+    ("Visibility hotkey key", "Letter to press with the modifier keys to hide or restore the island."),
+];
+
+/// `SettingDescription(name)`: the explanation for a setting, or `""`.
+pub fn setting_description(name: &str) -> String {
+    if let Some(tool) = name.strip_suffix(" tool") {
+        return format!(
+            "Show {tool} in Tools and its enabled hover pages. Hiding keeps saved data."
+        );
+    }
+    DESCRIPTIONS
+        .iter()
+        .find(|(k, _)| *k == name)
+        .map_or_else(String::new, |(_, v)| (*v).to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_and_visibility_settings_have_concrete_explanations() {
+        for name in [
+            "Content size",
+            "Content inset",
+            "Two-stage reveal",
+            "Tuck above maximized apps",
+            "Reduce motion",
+            "Glass intensity",
+        ] {
+            assert!(setting_description(name).len() > 30, "{name}");
+        }
+        assert_eq!(setting_description("Nothing like this"), "");
+        assert!(setting_description("Notes tool").starts_with("Show Notes in Tools"));
+    }
+}

@@ -25,7 +25,7 @@ impl<'a> Ui<'a> {
         let (_, y, _) = self.layouts.last().expect("layout").origin();
         let h = self
             .available_height()
-            .min((self.canvas.height() as f32 - y).max(0.0));
+            .min((self.canvas.bounds().h - y).max(0.0));
         self.scroll_area_h(salt, h, f)
     }
 
