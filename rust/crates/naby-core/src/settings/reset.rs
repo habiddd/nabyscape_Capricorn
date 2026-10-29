@@ -1,9 +1,43 @@
-//! Preference reset and restore (C# `PreferenceReset`). The C# version also writes
-//! `preference-backup.json` through the `Store` first; here the caller does that
-//! (`Store::save("preference-backup", &settings)`) before calling these pure functions.
+//! Preference reset and restore (C# `PreferenceReset`). [`reset_scope`] and [`restore_backup`]
+//! are the pure parts; [`reset_stored`] and [`restore_stored`] add the `preference-backup`
+//! document and the `settings` write through the [`Store`].
 
-use super::{copy_keys, policy::PREMIUM_KEYS, presets, ProfileError, Settings};
+use super::{copy_keys, policy::PREMIUM_KEYS, presets, ProfileError, Settings, SETTINGS_DOCUMENT};
+use crate::store::{Store, StoreError};
 use serde_json::Value;
+use std::fmt;
+
+/// Name of the document holding the settings saved before a reset.
+pub const BACKUP_DOCUMENT: &str = "preference-backup";
+
+/// Why a stored reset or restore failed. The live settings are unchanged in every case.
+#[derive(Debug)]
+pub enum PreferenceError {
+    Store(StoreError),
+    /// The backup file could not be read.
+    Io(std::io::Error),
+    /// The backup is not a complete settings document.
+    Invalid(ProfileError),
+}
+
+impl fmt::Display for PreferenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PreferenceError::Store(e) => e.fmt(f),
+            PreferenceError::Io(e) => write!(f, "The preference backup cannot be read: {e}"),
+            PreferenceError::Invalid(ProfileError::Invalid(why)) => f.write_str(why),
+            PreferenceError::Invalid(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for PreferenceError {}
+
+impl From<StoreError> for PreferenceError {
+    fn from(e: StoreError) -> Self {
+        PreferenceError::Store(e)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetScope {
@@ -352,6 +386,34 @@ pub fn restore_backup(settings: &mut Settings, backup_json: &str) -> Result<(), 
     let mut candidate = settings.clone();
     copy_keys(&restored, &mut candidate, &keys);
     candidate.normalize();
+    *settings = candidate;
+    Ok(())
+}
+
+/// C# `PreferenceReset.Reset`: saves the current settings as `preference-backup`, then resets
+/// the scope and saves `settings`. The backup must succeed before either the stored or the live
+/// preferences change.
+pub fn reset_stored(
+    store: &Store,
+    settings: &mut Settings,
+    scope: ResetScope,
+) -> Result<(), PreferenceError> {
+    let mut candidate = settings.clone();
+    reset_scope(&mut candidate, scope);
+    store.save(BACKUP_DOCUMENT, settings)?;
+    store.save(SETTINGS_DOCUMENT, &candidate)?;
+    *settings = candidate;
+    Ok(())
+}
+
+/// C# `PreferenceReset.Restore`: restores from the stored `preference-backup.json` and saves
+/// `settings`.
+pub fn restore_stored(store: &Store, settings: &mut Settings) -> Result<(), PreferenceError> {
+    let text = std::fs::read_to_string(store.dir().join(format!("{BACKUP_DOCUMENT}.json")))
+        .map_err(PreferenceError::Io)?;
+    let mut candidate = settings.clone();
+    restore_backup(&mut candidate, &text).map_err(PreferenceError::Invalid)?;
+    store.save(SETTINGS_DOCUMENT, &candidate)?;
     *settings = candidate;
     Ok(())
 }

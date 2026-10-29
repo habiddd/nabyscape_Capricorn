@@ -26,9 +26,9 @@ pub use focus::{check_countdowns, CountdownReport, FocusConfig, FocusEvent, Focu
 pub use links::{clean_link, try_clean_link, LinkError};
 pub use service::{ProductivityData, ProductivityService};
 pub use shelf::ShelfItem;
-pub use stopwatch::{Clock, Stopwatch};
+pub use stopwatch::{Clock, Clocks, Stopwatch, StopwatchState};
 pub use tasks::TaskItem;
-pub use timer::Timer;
+pub use timer::{format_seconds, Countdown, Timer};
 
 use serde::{Deserialize, Deserializer};
 use std::sync::atomic::{AtomicU64, Ordering};

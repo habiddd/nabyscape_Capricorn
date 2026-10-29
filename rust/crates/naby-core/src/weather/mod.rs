@@ -200,6 +200,20 @@ fn clock_of(time: &str) -> String {
     }
 }
 
+impl crate::store::Store {
+    /// The persisted forecast cache (`weather` document), if present and readable.
+    pub fn load_weather_cache(&self) -> Option<WeatherSnapshot> {
+        self.load(DOCUMENT_NAME).ok().flatten()
+    }
+
+    pub fn save_weather_cache(
+        &self,
+        snapshot: &WeatherSnapshot,
+    ) -> Result<(), crate::store::StoreError> {
+        self.save(DOCUMENT_NAME, snapshot)
+    }
+}
+
 /// Weather lookups and the in-memory forecast cache.
 #[derive(Debug, Default)]
 pub struct WeatherService {

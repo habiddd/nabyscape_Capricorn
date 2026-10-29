@@ -22,6 +22,8 @@ pub use backdrop::{
 };
 pub use presets::ProfileError;
 
+use crate::store::{Store, StoreError};
+
 /// Main-panel widget ids and display names, in C# `Settings.Names` insertion order.
 pub const WIDGET_NAMES: &[(&str, &str)] = &[
     ("voice", "Naby voice"),
@@ -659,6 +661,49 @@ pub(crate) fn copy_keys(source: &Settings, target: &mut Settings, keys: &[&str])
     }
     if let Ok(next) = serde_json::from_value::<Settings>(Value::Object(dst)) {
         *target = next;
+    }
+}
+
+/// Name of the settings document.
+pub const SETTINGS_DOCUMENT: &str = "settings";
+
+/// How [`Store::load_settings`] obtained its result.
+#[derive(Debug)]
+pub enum SettingsLoad {
+    /// `settings.json` exists and was read.
+    Loaded,
+    /// No `settings.json` yet: the factory preferences were used.
+    Missing,
+    /// The document is unreadable (corrupt, future schema or awaiting recovery). The file is left
+    /// untouched and saving is blocked by the store until a later load succeeds.
+    Fallback(StoreError),
+}
+
+impl Store {
+    /// C# `Store.Load<Settings>("settings")`: a missing document yields the factory preferences
+    /// ([`presets::recommended`]); an unreadable one yields them with clipboard history and model
+    /// downloads switched off (an unreadable profile must never enable background capture). The
+    /// result is always normalized.
+    pub fn load_settings(&self) -> (Settings, SettingsLoad) {
+        let (mut settings, how) = match self.load::<Settings>(SETTINGS_DOCUMENT) {
+            Ok(Some(settings)) => (settings, SettingsLoad::Loaded),
+            Ok(None) => (presets::recommended(), SettingsLoad::Missing),
+            Err(error) => {
+                let mut fallback = presets::recommended();
+                fallback.clipboard_history = false;
+                fallback.downloads_enabled = false;
+                (fallback, SettingsLoad::Fallback(error))
+            }
+        };
+        settings.normalize();
+        (settings, how)
+    }
+
+    /// Saves the normalized settings, preserving unknown keys of the stored document.
+    pub fn save_settings(&self, settings: &Settings) -> Result<(), StoreError> {
+        let mut normalized = settings.clone();
+        normalized.normalize();
+        self.save(SETTINGS_DOCUMENT, &normalized)
     }
 }
 

@@ -11,9 +11,18 @@ fn next_run_id() -> u64 {
     NEXT_RUN.fetch_add(1, Ordering::Relaxed)
 }
 
+fn secs(seconds: f64) -> chrono::Duration {
+    // Duration::try_milliseconds fails on overflow; clamp to something representable.
+    chrono::Duration::try_milliseconds((seconds * 1000.0).clamp(-9.0e15, 9.0e15) as i64)
+        .unwrap_or_else(chrono::Duration::zero)
+}
+
 fn seconds_between(later: DateTime<Utc>, earlier: DateTime<Utc>) -> f64 {
     (later - earlier).num_milliseconds() as f64 / 1000.0
 }
+
+/// The C# `Countdown` name (timer and focus runs share it).
+pub type Countdown = Timer;
 
 /// Serializes like the C# `Countdown` (`Deadline`, `RemainingSeconds`, `DurationSeconds`, `Phase`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -33,22 +42,31 @@ impl Timer {
         self.deadline.is_some()
     }
 
+    /// Seconds left at `now` (never negative; non-finite persisted values count as zero).
     pub fn remaining(&self, now: DateTime<Utc>) -> f64 {
-        match self.deadline {
+        let value = match self.deadline {
             Some(deadline) => seconds_between(deadline, now),
             None => self.remaining_seconds,
+        };
+        if value.is_finite() {
+            value.max(0.0)
+        } else {
+            0.0
         }
-        .max(0.0)
     }
 
     pub fn start(&mut self, seconds: f64, now: DateTime<Utc>, phase: &str, preserve_run_id: bool) {
         if !preserve_run_id {
             self.run_id = next_run_id();
         }
-        self.duration_seconds = seconds.max(1.0);
-        self.remaining_seconds = self.duration_seconds;
-        self.deadline =
-            Some(now + chrono::Duration::milliseconds((self.remaining_seconds * 1000.0) as i64));
+        let seconds = if seconds.is_finite() {
+            seconds.max(1.0)
+        } else {
+            1.0
+        };
+        self.duration_seconds = seconds;
+        self.remaining_seconds = seconds;
+        self.deadline = now.checked_add_signed(secs(seconds));
         self.phase = phase.to_string();
     }
 
@@ -69,9 +87,7 @@ impl Timer {
 
     pub fn resume(&mut self, now: DateTime<Utc>) {
         if self.remaining_seconds > 0.0 {
-            self.deadline = Some(
-                now + chrono::Duration::milliseconds((self.remaining_seconds * 1000.0) as i64),
-            );
+            self.deadline = now.checked_add_signed(secs(self.remaining_seconds));
         }
     }
 
@@ -100,15 +116,21 @@ impl Timer {
     }
 }
 
-/// `mm:ss`, or `h:mm:ss` from one hour up. Rounds partial seconds up.
+/// C# `TimeSpan` formatting (rounded up to the next second): `h\:mm\:ss` with the hour component
+/// 0-23 from one hour up, else `mm\:ss`.
 pub fn format_seconds(seconds: f64) -> String {
     let total = if seconds.is_finite() {
-        seconds.max(0.0).ceil() as u64
+        seconds.max(0.0).ceil().min(9.0e11) as u64
     } else {
         0
     };
     if total >= 3600 {
-        format!("{}:{:02}:{:02}", total / 3600, total / 60 % 60, total % 60)
+        format!(
+            "{}:{:02}:{:02}",
+            total / 3600 % 24,
+            total / 60 % 60,
+            total % 60
+        )
     } else {
         format!("{:02}:{:02}", total / 60, total % 60)
     }
@@ -215,6 +237,77 @@ mod tests {
         let csharp = r#"{"Deadline":"2026-10-14T19:05:00+07:00","RemainingSeconds":300,"DurationSeconds":300,"Phase":"work"}"#;
         let from_csharp: Timer = serde_json::from_str(csharp).unwrap();
         assert_eq!(from_csharp.remaining(t0()), 300.0);
+    }
+
+    #[test]
+    fn start_pause_resume_complete() {
+        let mut c = Timer::default();
+        assert!(!c.running());
+        c.start(90.0, t0(), "focus", false);
+        assert!(c.running() && c.run_id != 0);
+        assert_eq!(c.remaining(t0() + secs(30)), 60.0);
+        assert_eq!(c.display(t0() + secs(30)), "01:00");
+        assert!((c.progress(t0() + secs(45)) - 0.5).abs() < 1e-9);
+
+        c.pause(t0() + secs(30));
+        assert!(!c.running());
+        assert_eq!(c.remaining(t0() + secs(500)), 60.0);
+        c.resume(t0() + secs(100));
+        assert_eq!(c.remaining(t0() + secs(130)), 30.0);
+
+        assert!(!c.complete(t0() + secs(159)));
+        assert!(c.complete(t0() + secs(160)));
+        assert!(!c.complete(t0() + secs(161)), "completion fires once");
+        assert_eq!(c.remaining(t0() + secs(500)), 0.0);
+    }
+
+    #[test]
+    fn minimum_one_second_and_run_ids() {
+        let mut c = Timer::default();
+        c.start(0.0, t0(), "", false);
+        assert_eq!(c.duration_seconds, 1.0);
+        c.start(f64::NAN, t0(), "", false);
+        assert_eq!(c.duration_seconds, 1.0);
+        c.start(f64::INFINITY, t0(), "", false);
+        assert_eq!(c.duration_seconds, 1.0);
+        let id = c.run_id;
+        c.start(5.0, t0(), "", true);
+        assert_eq!(c.run_id, id, "preserve_run_id keeps the run");
+        c.start(5.0, t0(), "", false);
+        assert_ne!(c.run_id, id);
+        let before = c.run_id;
+        c.reset();
+        assert_ne!(c.run_id, before);
+        assert!(!c.running() && c.duration_seconds == 0.0 && c.phase.is_empty());
+    }
+
+    #[test]
+    fn format_matches_timespan() {
+        assert_eq!(format_seconds(0.0), "00:00");
+        assert_eq!(format_seconds(59.2), "01:00");
+        assert_eq!(format_seconds(3599.0), "59:59");
+        assert_eq!(format_seconds(3600.0), "1:00:00");
+        assert_eq!(format_seconds(3725.0), "1:02:05");
+        // h in the C# format is the 0-23 hour component.
+        assert_eq!(format_seconds(86_400.0 + 61.0), "0:01:01");
+    }
+
+    #[test]
+    fn json_keys_match_csharp() {
+        let mut c = Timer::default();
+        c.start(60.0, t0(), "Work", false);
+        let v = serde_json::to_value(&c).unwrap();
+        let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["Deadline", "DurationSeconds", "Phase", "RemainingSeconds"]
+        );
+        let idle = serde_json::to_value(Timer::default()).unwrap();
+        assert_eq!(idle["Deadline"], serde_json::Value::Null);
+        let back: Timer = serde_json::from_value(v).unwrap();
+        assert_eq!(back.run_id, 0);
+        assert_eq!(back.deadline, c.deadline);
     }
 
     #[test]

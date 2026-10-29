@@ -377,6 +377,26 @@ impl Options {
     }
 }
 
+impl crate::store::Store {
+    /// The `assistant` document with the `Options::from_json` rules (nulls tolerated, providers
+    /// sanitized); missing or unreadable yields the defaults.
+    pub fn load_assistant_options(&self) -> Options {
+        let mut options: Options = self.load(DOCUMENT_NAME).ok().flatten().unwrap_or_default();
+        options.normalize();
+        options
+    }
+
+    /// Saves the sanitized options as the `assistant` document.
+    pub fn save_assistant_options(
+        &self,
+        options: &Options,
+    ) -> Result<(), crate::store::StoreError> {
+        let mut options = options.clone();
+        options.normalize();
+        self.save(DOCUMENT_NAME, &options)
+    }
+}
+
 /// A function the model may call (`AssistantTool`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tool {

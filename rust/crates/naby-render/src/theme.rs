@@ -1,9 +1,11 @@
 //! Colors, radii and font sizes from `Theme.xaml` / `AssistantTheme.xaml` and `UI.cs`.
 //!
-//! `Theme::from_settings` is added during integration; until then build a theme with
-//! [`Theme::default`] or [`Theme::new`].
+//! [`Theme::from_settings`] maps the user's preferences onto a theme the way `UI.ApplyControlTheme`
+//! does; [`Theme::default`] and [`Theme::new`] build one without settings.
 
 use naby_core::color::Rgba;
+use naby_core::i18n::Accessibility;
+use naby_core::settings::Settings;
 
 /// Font sizes used by the shared widgets (WPF device-independent pixels).
 pub const FONT_BODY: f32 = 13.0;
@@ -106,6 +108,48 @@ impl Theme {
         }
     }
 
+    /// The theme for `settings` (C# `UI.ApplyControlTheme` plus the accessibility preferences):
+    /// Background, Accent, ControlFill, ControlBorder and SelectionFill colors (an invalid value
+    /// keeps the built-in default), contrast text derived from the fills, the accessibility text
+    /// scale (1.0 to 1.5) and `BoldHeadings`. `high_contrast` is set when the preference forces it;
+    /// the host then replaces the palette with the system colors via [`Theme::high_contrast`]
+    /// (it also does so when Windows itself reports high contrast). `Settings.Radius` is the
+    /// dock's own corner radius, so control radii stay at the fixed XAML values.
+    pub fn from_settings(settings: &Settings) -> Theme {
+        let base = Theme::default();
+        let pick = |value: &str, fallback: Rgba| Rgba::parse_hex(value).unwrap_or(fallback);
+        let mut theme = Theme::new(
+            pick(&settings.background, base.background),
+            pick(&settings.accent, base.accent),
+            pick(&settings.control_fill, base.control_fill),
+            pick(&settings.control_border, base.control_border),
+            pick(&settings.selection_fill, base.selection_fill),
+        );
+        theme.apply_preferences(settings);
+        theme
+    }
+
+    /// [`Theme::high_contrast`] with the text scale and heading weight of `settings`.
+    pub fn high_contrast_for(
+        settings: &Settings,
+        window: Rgba,
+        window_text: Rgba,
+        highlight: Rgba,
+        highlight_text: Rgba,
+    ) -> Theme {
+        let mut theme = Theme::high_contrast(window, window_text, highlight, highlight_text);
+        theme.apply_preferences(settings);
+        theme.high_contrast = true;
+        theme
+    }
+
+    fn apply_preferences(&mut self, settings: &Settings) {
+        let accessibility = Accessibility::from_settings(settings);
+        self.text_scale = accessibility.text_scale as f32;
+        self.high_contrast = accessibility.force_high_contrast;
+        self.bold_headings = settings.bold_headings;
+    }
+
     /// System-color theme for Windows high-contrast mode (`window`, `window_text`,
     /// `highlight`, `highlight_text` come from `GetSysColor`).
     pub fn high_contrast(
@@ -155,6 +199,7 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use naby_core::settings::presets;
 
     #[test]
     fn defaults_match_theme_xaml() {
@@ -165,6 +210,82 @@ mod tests {
         assert_eq!(t.text_dim.to_hex(), "#A6ABB4");
         assert_eq!(t.control_text, Rgba::WHITE);
         assert_eq!(t.radius, 8.0);
+    }
+
+    #[test]
+    fn recommended_preset_maps_colors_and_preferences() {
+        let settings = presets::recommended();
+        let t = Theme::from_settings(&settings);
+        assert_eq!(t.background, Rgba::parse_hex(&settings.background).unwrap());
+        assert_eq!(t.accent, Rgba::parse_hex(&settings.accent).unwrap());
+        assert_eq!(
+            t.control_fill,
+            Rgba::parse_hex(&settings.control_fill).unwrap()
+        );
+        assert_eq!(
+            t.control_border,
+            Rgba::parse_hex(&settings.control_border).unwrap()
+        );
+        assert_eq!(
+            t.selection_fill,
+            Rgba::parse_hex(&settings.selection_fill).unwrap()
+        );
+        assert_eq!(t.control_text, Theme::contrast_text(t.control_fill));
+        assert_eq!(t.checked_text, t.control_fill);
+        assert_eq!(t.text_scale, 1.0);
+        assert!(!t.high_contrast);
+        assert_eq!(t.bold_headings, settings.bold_headings);
+        assert_eq!(t.radius, RADIUS_CONTROL);
+    }
+
+    #[test]
+    fn custom_colors_scale_and_contrast_follow_settings() {
+        let settings = Settings {
+            control_fill: "#F5F5F5".into(),
+            selection_fill: "#102030".into(),
+            accent: "#FF8800".into(),
+            accessibility_text_scale: 1.25,
+            accessibility_high_contrast: true,
+            bold_headings: true,
+            ..Settings::default()
+        };
+        let t = Theme::from_settings(&settings);
+        assert_eq!(t.accent.to_hex(), "#FF8800");
+        assert_eq!(
+            t.control_text.to_hex(),
+            "#111317",
+            "dark text on a light fill"
+        );
+        assert_eq!(t.selection_text, Rgba::WHITE);
+        assert_eq!(t.scaled(12.0), 15.0);
+        assert!(t.high_contrast && t.bold_headings);
+        let hc = Theme::high_contrast_for(
+            &settings,
+            Rgba::BLACK,
+            Rgba::WHITE,
+            Rgba::rgb(0, 255, 255),
+            Rgba::BLACK,
+        );
+        assert!(hc.high_contrast && hc.bold_headings);
+        assert_eq!(hc.text_scale, 1.25);
+        assert_eq!(hc.control_border, Rgba::WHITE);
+    }
+
+    #[test]
+    fn invalid_colors_and_scales_fall_back() {
+        let settings = Settings {
+            control_fill: "nope".into(),
+            accessibility_text_scale: f64::NAN,
+            ..Settings::default()
+        };
+        let t = Theme::from_settings(&settings);
+        assert_eq!(t.control_fill, Theme::default().control_fill);
+        assert_eq!(t.text_scale, 1.0);
+        let big = Theme::from_settings(&Settings {
+            accessibility_text_scale: 9.0,
+            ..Settings::default()
+        });
+        assert_eq!(big.text_scale, 1.5);
     }
 
     #[test]
