@@ -114,6 +114,8 @@ pub enum Command {
     /// Dismiss it and show the next queued notice.
     NoticeNext,
     NoticeClearAll,
+    /// The notice card was shown: freeze it so later arrivals queue behind it instead of merging.
+    NoticeDisplayed,
     /// A view reports something the user should see (routing, quiet hours and kind gates apply).
     Notify {
         kind: NoticeKind,

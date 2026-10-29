@@ -37,4 +37,10 @@ pub enum HostEvent {
     WindowDpi(u32),
     /// The dock window lost keyboard focus it had taken for text editing.
     TextFocusLost,
+    /// A left or right mouse press anywhere on screen (only while the outside-click hook runs);
+    /// screen coordinates.
+    OutsideClick {
+        x: i32,
+        y: i32,
+    },
 }

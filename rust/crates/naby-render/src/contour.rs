@@ -53,6 +53,35 @@ impl Canvas {
         }
     }
 
+    /// Strokes a circular arc clockwise from `from` radians (0 = 12 o'clock) sweeping `sweep`
+    /// radians, as a polyline of at most 96 segments.
+    pub fn stroke_arc(
+        &mut self,
+        center: (f32, f32),
+        radius: f32,
+        from: f32,
+        sweep: f32,
+        color: naby_core::color::Rgba,
+        width: f32,
+    ) {
+        let steps = ((sweep.abs() / std::f32::consts::TAU) * 96.0)
+            .ceil()
+            .clamp(2.0, 96.0) as usize;
+        let mut pb = PathBuilder::new();
+        for i in 0..=steps {
+            let a = from + sweep * i as f32 / steps as f32;
+            let (x, y) = (center.0 + radius * a.sin(), center.1 - radius * a.cos());
+            if i == 0 {
+                pb.move_to(x, y);
+            } else {
+                pb.line_to(x, y);
+            }
+        }
+        if let Some(path) = pb.finish() {
+            self.stroke_path(&path, &Fill::Solid(color), width, Transform::identity());
+        }
+    }
+
     /// Clips to the island outline until [`Canvas::pop_clip`].
     pub fn push_clip_contour(&mut self, contour: &Contour, dx: f32, dy: f32, scale: f32) {
         let path = contour_path(contour, dx, dy, scale);

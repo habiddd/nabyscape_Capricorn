@@ -5,19 +5,26 @@
 //! Window procedures only translate messages into `HostEvent`s; this loop applies them, so
 //! application state is never borrowed re-entrantly from inside Win32 callbacks.
 
+use crate::overlay_host::ShellAction;
 use naby_core::settings::{presets, Settings};
 use naby_core::store::Store;
 use naby_render::{Canvas, Fonts, InputState};
+use naby_ui::host::{DisplayInfo, Signal};
 use std::time::Instant;
 
-/// What the dock window shows. The overlay implements this; the shell ships a placeholder.
+/// What the dock window shows. `OverlayHost` implements it; every method but the first five
+/// has a do-nothing default so test doubles stay small.
+///
+/// Frame protocol: the shell calls `tick()` (advance time), then reads `size()` / `placement()`,
+/// paints, presents, and arms one timer for `next_frame()` (or none when it is `None`).
 pub trait Surface {
-    /// Draws the whole surface. `canvas` has exactly `size()` pixels and is cleared by the
-    /// caller to transparent.
+    /// Draws the whole surface. `canvas` has exactly `size()` pixels and is cleared to
+    /// transparent by the caller.
     fn paint(&mut self, canvas: &mut Canvas, fonts: &Fonts);
     /// Handles one frame of pointer / keyboard input; true when a repaint is needed.
     fn input(&mut self, input: &InputState) -> bool;
-    /// Pixel size of the window the surface wants (already DPI scaled).
+    /// Pixel size of the window the surface wants (already DPI scaled); `(0, 0)` while hidden,
+    /// which makes the shell release the window and every pixel buffer.
     fn size(&self) -> (u32, u32);
     /// When the surface wants to be painted next while animating or counting down; `None`
     /// when static (no timer is armed then).
@@ -29,6 +36,38 @@ pub trait Surface {
     /// A service called the `Waker`; pull fresh snapshots. True when a repaint is needed.
     fn wake(&mut self) -> bool {
         false
+    }
+    /// The frame timer fired: advance animations and timers. True when a repaint is needed.
+    fn tick(&mut self) -> bool {
+        false
+    }
+    /// Top-left of the window in screen pixels, `None` to let the shell place it.
+    fn placement(&self) -> Option<(i32, i32)> {
+        None
+    }
+    /// The monitor the dock lives on changed (bounds, work area, DPI).
+    fn set_display(&mut self, _display: DisplayInfo) {}
+    /// A hotkey, tray command or environment change. True when a repaint is needed.
+    fn signal(&mut self, _signal: Signal) -> bool {
+        false
+    }
+    /// The window should take keyboard focus (panel open).
+    fn wants_focus(&self) -> bool {
+        false
+    }
+    /// Install the outside-click hook while a panel or peek is open.
+    fn wants_outside_clicks(&self) -> bool {
+        false
+    }
+    /// A drag or edit is in progress (the dock must not follow the pointer to another monitor).
+    fn interaction_active(&self) -> bool {
+        false
+    }
+    /// The window was hidden: drop caches.
+    fn on_hide(&mut self) {}
+    /// Things only the app shell can do (settings window, tray balloons, quit).
+    fn take_actions(&mut self) -> Vec<ShellAction> {
+        Vec::new()
     }
 }
 
@@ -89,16 +128,15 @@ pub use os::{App, HostHandle};
 #[cfg(windows)]
 mod os {
     use super::*;
-    use crate::awake::{new_keep_awake, KeepAwake};
     use crate::event::{HostEvent, WM_APP_TRAY, WM_APP_WAKE};
     use crate::fullscreen::{foreground_should_hide, ForegroundHooks};
     use crate::hotkeys::{HotkeyAction, Hotkeys};
     use crate::instance::{self, Acquire, Instance};
     use crate::monitors::{
-        choose_monitor, cursor_pos, dock_area, enumerate, monitor_at, place_dock, FollowPolicy,
-        MonitorInfo,
+        choose_monitor, cursor_pos, enumerate, monitor_at, refresh_rate, FollowPolicy, MonitorInfo,
     };
-    use crate::placeholder::PlaceholderSurface;
+    use crate::outside_click::OutsideClickHook;
+    use crate::overlay_host::{display_info, OverlayHost};
     use crate::startup;
     use crate::timer::AnimationTimer;
     use crate::tray::{Tray, TrayCommand, WakeMenu, TOOLTIP};
@@ -106,6 +144,7 @@ mod os {
     use crate::window::{ensure_class, set_user_data, user_data, LayeredWindow};
     use naby_core::color::Rgba;
     use naby_core::settings::DisplayMode;
+    use naby_ui::host::Signal;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::Arc;
@@ -202,6 +241,27 @@ mod os {
         }
     }
 
+    /// A `Waker` that posts `WM_APP_WAKE` to `hwnd`, coalescing bursts into one pending message.
+    fn make_waker(hwnd: HWND, pending: Arc<AtomicBool>) -> Waker {
+        let hwnd = hwnd.0 as isize;
+        Arc::new(move || {
+            if !pending.swap(true, Ordering::AcqRel) {
+                // SAFETY: PostMessage is thread-safe; a destroyed window just fails.
+                let posted = unsafe {
+                    PostMessageW(
+                        Some(HWND(hwnd as *mut _)),
+                        WM_APP_WAKE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    )
+                };
+                if posted.is_err() {
+                    pending.store(false, Ordering::Release);
+                }
+            }
+        })
+    }
+
     /// What services need to talk to the UI thread: post events and wake the loop.
     #[derive(Clone)]
     pub struct HostHandle {
@@ -225,7 +285,7 @@ mod os {
         host: HWND,
         host_shared: *mut HostShared,
         instance: Instance,
-        store: Store,
+        store: Arc<Store>,
         settings: Settings,
         fonts: Fonts,
         canvas: Canvas,
@@ -234,15 +294,15 @@ mod os {
         tray: Tray,
         hotkeys: Hotkeys,
         timer: AnimationTimer,
-        awake: KeepAwake,
         hooks: Option<ForegroundHooks>,
+        outside: Option<OutsideClickHook>,
         monitors: Vec<MonitorInfo>,
         follow: FollowPolicy,
         followed: Option<String>,
         follow_clock: Instant,
         follow_due: Instant,
-        user_hidden: bool,
-        env_hidden: bool,
+        /// Where the dock window is on screen (outside-click hit testing).
+        window_origin: (i32, i32),
         quit: bool,
     }
 
@@ -281,7 +341,7 @@ mod os {
         }
 
         fn new(args: Args, instance: Instance) -> windows::core::Result<App> {
-            let store = Store::open_default();
+            let store = Arc::new(Store::open_default());
             let (mut settings, warning) = load_settings(&store);
             settings.auto_start = startup::enabled();
 
@@ -317,10 +377,14 @@ mod os {
             };
 
             let monitors = enumerate();
-            let scale =
-                pick_monitor(&settings, &monitors, None).map_or(1.0, |i| monitors[i].scale());
-            let surface: Box<dyn Surface> = Box::new(PlaceholderSurface::new(&settings, scale));
+            let display = pick_monitor(&settings, &monitors, None)
+                .map(|i| display_info(&monitors[i], refresh_rate(&monitors[i].id)))
+                .unwrap_or_default();
+            let waker = make_waker(host, wake_pending.clone());
+            let mut overlay = OverlayHost::new(store.clone(), waker, settings.clone(), display);
             let window = LayeredWindow::new(tx.clone())?;
+            overlay.attach_window(window.hwnd());
+            let surface: Box<dyn Surface> = Box::new(overlay);
             let tray = Tray::new(host, TOOLTIP);
             let timer = AnimationTimer::new()?;
 
@@ -341,15 +405,14 @@ mod os {
                 tray,
                 hotkeys: Hotkeys::new(),
                 timer,
-                awake: new_keep_awake(),
                 hooks: None,
+                outside: None,
                 monitors,
                 follow: FollowPolicy::default(),
                 followed: None,
                 follow_clock: Instant::now(),
                 follow_due: Instant::now(),
-                user_hidden: false,
-                env_hidden: false,
+                window_origin: (0, 0),
                 quit: false,
             };
             app.canvas.release();
@@ -377,27 +440,9 @@ mod os {
             }
         }
 
-        /// A `Waker` that posts `WM_APP_WAKE` to the host window, coalescing bursts into one
-        /// pending message.
+        /// A `Waker` that posts `WM_APP_WAKE` to the host window.
         pub fn waker(&self) -> Waker {
-            let hwnd = self.host.0 as isize;
-            let pending = self.wake_pending.clone();
-            Arc::new(move || {
-                if !pending.swap(true, Ordering::AcqRel) {
-                    // SAFETY: PostMessage is thread-safe; a destroyed window just fails.
-                    let posted = unsafe {
-                        PostMessageW(
-                            Some(HWND(hwnd as *mut _)),
-                            WM_APP_WAKE,
-                            WPARAM(0),
-                            LPARAM(0),
-                        )
-                    };
-                    if posted.is_err() {
-                        pending.store(false, Ordering::Release);
-                    }
-                }
-            })
+            make_waker(self.host, self.wake_pending.clone())
         }
 
         /// Shows a tray balloon (the shell-level notification path).
@@ -463,16 +508,17 @@ mod os {
         fn handle_event(&mut self, event: HostEvent) {
             match event {
                 HostEvent::Wake => {
-                    if self.surface.wake() {
-                        self.repaint();
-                    }
+                    let changed = self.surface.wake();
+                    self.after_surface(changed);
                 }
-                HostEvent::Hotkey(action) => match action {
-                    HotkeyAction::Panel => self.reveal(),
-                    HotkeyAction::Visibility => self.toggle_visibility(),
-                    // No tuck state exists before the overlay lands.
-                    HotkeyAction::Tuck => {}
-                },
+                HostEvent::Hotkey(action) => {
+                    let signal = match action {
+                        HotkeyAction::Panel => Signal::Panel,
+                        HotkeyAction::Visibility => Signal::ToggleVisibility,
+                        HotkeyAction::Tuck => Signal::ToggleTuck,
+                    };
+                    self.signal(signal);
+                }
                 HostEvent::Tray(command) => self.tray_command(command),
                 HostEvent::TrayMenu => {
                     // The assistant (and its wake word) arrives in a later task.
@@ -489,9 +535,9 @@ mod os {
                         .followed
                         .take()
                         .filter(|id| self.monitors.iter().any(|m| &m.id == id));
-                    self.sync_scale();
+                    self.sync_display();
                     self.check_environment();
-                    self.repaint();
+                    self.signal(Signal::DisplayChanged);
                 }
                 HostEvent::ForegroundChanged => {
                     ForegroundHooks::acknowledge();
@@ -499,42 +545,50 @@ mod os {
                 }
                 HostEvent::Input => {
                     let input = self.window.take_input();
-                    if self.surface.input(&input) {
-                        self.repaint();
-                    } else {
-                        self.reschedule();
-                    }
+                    let changed = self.surface.input(&input);
+                    self.after_surface(changed);
                 }
                 HostEvent::WindowDpi(_) => {
                     self.monitors = enumerate();
-                    self.sync_scale();
-                    self.repaint();
+                    self.sync_display();
+                    self.signal(Signal::DisplayChanged);
                 }
-                HostEvent::TextFocusLost => {
-                    if self.surface.input(&InputState::default()) {
-                        self.repaint();
-                    }
+                HostEvent::TextFocusLost => self.signal(Signal::FocusLost),
+                HostEvent::OutsideClick { x, y } => {
+                    let local = (
+                        (x - self.window_origin.0) as f32,
+                        (y - self.window_origin.1) as f32,
+                    );
+                    self.signal(Signal::OutsideClick {
+                        x: local.0,
+                        y: local.1,
+                    });
                 }
             }
+        }
+
+        fn signal(&mut self, signal: Signal) {
+            let changed = self.surface.signal(signal);
+            self.after_surface(changed);
         }
 
         fn tray_command(&mut self, command: TrayCommand) {
             match command {
-                TrayCommand::OpenIsland => self.reveal(),
+                TrayCommand::OpenIsland => self.signal(Signal::Panel),
                 TrayCommand::Settings => self.open_settings(),
-                TrayCommand::HideShow => self.toggle_visibility(),
+                TrayCommand::HideShow => self.signal(Signal::ToggleVisibility),
+                TrayCommand::Tuck => self.signal(Signal::ToggleTuck),
                 TrayCommand::Quit => self.quit = true,
-                // Overlay-, assistant- and tuck-specific commands arrive with those tasks.
+                // Assistant- and command-bar-specific commands arrive with those tasks.
                 TrayCommand::CommandBar
                 | TrayCommand::MoveResize
                 | TrayCommand::Assistant
                 | TrayCommand::ToggleWake
-                | TrayCommand::StopMicrophones
-                | TrayCommand::Tuck => {}
+                | TrayCommand::StopMicrophones => {}
             }
         }
 
-        // ---- settings, monitors, visibility --------------------------------------------
+        // ---- settings, monitors, visibility ---------------------------------------------
 
         /// Pushes `self.settings` into every part of the shell (also the hook for the future
         /// settings window).
@@ -547,9 +601,9 @@ mod os {
                 self.hooks = Some(ForegroundHooks::install(self.tx.clone()));
             } else if !wants_hooks {
                 self.hooks = None;
-                self.env_hidden = false;
+                self.signal_environment(false);
             }
-            self.sync_scale();
+            self.sync_display();
             self.check_environment();
             self.repaint();
         }
@@ -557,11 +611,6 @@ mod os {
         /// Current settings (read-only; the settings window will edit and re-apply).
         pub fn settings(&self) -> &Settings {
             &self.settings
-        }
-
-        /// The keep-awake state machine, bound to the real syscall.
-        pub fn awake(&mut self) -> &mut KeepAwake {
-            &mut self.awake
         }
 
         pub fn store(&self) -> &Store {
@@ -572,26 +621,18 @@ mod os {
             pick_monitor(&self.settings, &self.monitors, self.followed.as_deref())
         }
 
-        fn sync_scale(&mut self) {
+        /// Tells the surface which monitor it lives on.
+        fn sync_display(&mut self) {
             if let Some(i) = self.monitor_index() {
-                self.surface.set_scale(self.monitors[i].scale());
+                let m = &self.monitors[i];
+                self.surface
+                    .set_display(display_info(m, refresh_rate(&m.id)));
             }
         }
 
-        fn should_show(&self) -> bool {
-            !self.user_hidden && !self.env_hidden
-        }
-
-        fn toggle_visibility(&mut self) {
-            self.user_hidden = !self.user_hidden;
-            self.apply_visibility();
-        }
-
-        fn reveal(&mut self) {
-            if self.user_hidden {
-                self.user_hidden = false;
-                self.apply_visibility();
-            }
+        fn signal_environment(&mut self, hide: bool) {
+            let changed = self.surface.signal(Signal::EnvironmentHidden(hide));
+            self.after_surface(changed);
         }
 
         fn check_environment(&mut self) {
@@ -603,70 +644,84 @@ mod os {
                 ),
                 _ => false,
             };
-            if hide != self.env_hidden {
-                self.env_hidden = hide;
-                self.apply_visibility();
+            self.signal_environment(hide);
+        }
+
+        /// Runs the shell actions the surface queued and repaints when it changed.
+        fn after_surface(&mut self, changed: bool) {
+            for action in self.surface.take_actions() {
+                match action {
+                    ShellAction::OpenSettings(_) => self.open_settings(),
+                    ShellAction::Quit => self.quit = true,
+                    ShellAction::Balloon { title, detail } => self.notify(&title, &detail),
+                    ShellAction::OpenAssistant | ShellAction::OpenVoice => self.notify(
+                        "Assistant",
+                        "The assistant is not part of this build of the new shell yet.",
+                    ),
+                    ShellAction::SettingsApplied(settings) => {
+                        self.settings = *settings;
+                        self.hotkeys.configure(self.host, &self.settings);
+                        self.window.set_opacity(self.settings.opacity as f32);
+                    }
+                }
+            }
+            if changed {
+                self.repaint();
+            } else {
+                self.reschedule();
             }
         }
 
-        /// Shows or hides the dock; hiding frees the window DIB, the canvas, the glyph cache
-        /// and the timer.
-        fn apply_visibility(&mut self) {
-            if self.should_show() {
-                self.repaint();
-            } else {
+        fn shown(&self) -> bool {
+            self.surface.size().0 > 0
+        }
+
+        // ---- painting ---------------------------------------------------------------------
+
+        fn repaint(&mut self) {
+            let size = self.surface.size();
+            if size.0 == 0 || size.1 == 0 {
+                // Hidden (visibility hotkey, fullscreen app): free the window DIB, the canvas,
+                // the glyph cache and the pointer hook.
                 self.window.release();
                 self.canvas.release();
                 self.fonts.clear_cache();
-                self.timer.cancel();
-                self.follow.reset();
-            }
-        }
-
-        // ---- painting ------------------------------------------------------------------
-
-        fn dock_position(&self, size: (u32, u32)) -> (i32, i32) {
-            let Some(i) = self.monitor_index() else {
-                return (0, 0);
-            };
-            let monitor = &self.monitors[i];
-            place_dock(
-                &self.settings,
-                dock_area(monitor, self.settings.dock_edge()),
-                monitor.scale() as f64,
-                size.0 as i32,
-                size.1 as i32,
-                false,
-                size.0 as i32,
-            )
-        }
-
-        fn repaint(&mut self) {
-            if !self.should_show() {
+                self.outside = None;
+                self.surface.on_hide();
+                self.reschedule();
                 return;
             }
-            let size = self.surface.size();
             self.canvas.resize(size.0, size.1);
             self.canvas.clear(Rgba::TRANSPARENT);
             self.surface.paint(&mut self.canvas, &self.fonts);
-            let (x, y) = self.dock_position(size);
+            let (x, y) = self.surface.placement().unwrap_or((0, 0));
             self.window.present(&self.canvas, x, y);
+            self.window_origin = (x, y);
+            self.window.set_text_input(self.surface.wants_focus());
+            self.sync_outside_hook();
             self.reschedule();
+        }
+
+        fn sync_outside_hook(&mut self) {
+            if self.surface.wants_outside_clicks() {
+                if self.outside.is_none() {
+                    self.outside = OutsideClickHook::install(self.tx.clone());
+                }
+            } else {
+                self.outside = None;
+            }
         }
 
         /// Arms the timer for the surface's next frame (and `Follow` polling) or disarms it.
         fn reschedule(&mut self) {
-            if !self.should_show() {
-                self.timer.cancel();
-                return;
-            }
-            let follow = (self.settings.display_mode() == DisplayMode::Follow).then(|| {
-                let now = Instant::now();
-                if self.follow_due <= now {
-                    self.follow_due = now + FOLLOW_POLL;
-                }
-                self.follow_due
-            });
+            let follow = (self.settings.display_mode() == DisplayMode::Follow && self.shown())
+                .then(|| {
+                    let now = Instant::now();
+                    if self.follow_due <= now {
+                        self.follow_due = now + FOLLOW_POLL;
+                    }
+                    self.follow_due
+                });
             let next = match (self.surface.next_frame(), follow) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
@@ -683,20 +738,13 @@ mod os {
             }
             self.follow_tick();
             self.follow_due = Instant::now();
-            let frame_due = self
-                .surface
-                .next_frame()
-                .is_some_and(|t| t <= Instant::now() + Duration::from_millis(1));
-            if frame_due {
-                self.repaint();
-            } else {
-                self.reschedule();
-            }
+            let changed = self.surface.tick();
+            self.after_surface(changed);
         }
 
         /// `Follow` mode: move the dock to the monitor the pointer dwells on.
         fn follow_tick(&mut self) {
-            if self.settings.display_mode() != DisplayMode::Follow || !self.should_show() {
+            if self.settings.display_mode() != DisplayMode::Follow || !self.shown() {
                 self.follow.reset();
                 return;
             }
@@ -707,7 +755,7 @@ mod os {
                 return;
             };
             let now_ms = self.follow_clock.elapsed().as_millis() as i64;
-            let blocked = self.window.has_text_input();
+            let blocked = self.window.has_text_input() || self.surface.interaction_active();
             let next = self.follow.observe(
                 &self.monitors[current].id,
                 &self.monitors[under].id,
@@ -718,9 +766,9 @@ mod os {
             );
             if let Some(id) = next {
                 self.followed = Some(id);
-                self.sync_scale();
+                self.sync_display();
                 self.check_environment();
-                self.repaint();
+                self.signal(Signal::DisplayChanged);
             }
         }
     }
@@ -741,9 +789,9 @@ mod os {
     impl Drop for App {
         fn drop(&mut self) {
             self.hooks = None;
+            self.outside = None;
             self.hotkeys.unregister_all();
             self.tray.remove();
-            let _ = self.awake.dispose();
             // SAFETY: destroys the host window, then frees the shared state its window
             // procedure was reading (WM_DESTROY handling never touches it).
             unsafe {
