@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use naby_core::assistant::speech::{asr_by_id, own_asr, own_tts};
+use naby_core::assistant::speech::{asr_by_id, own_asr, own_tts, tts_by_id};
 use naby_core::assistant::storage::SpeechStorage;
 use naby_core::assistant::voice::VoiceTurn;
 use naby_core::assistant::{Options, State};
@@ -107,11 +107,12 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 impl VoiceRuntime {
     pub fn new(service: AssistantService, data_dir: &std::path::Path, waker: Waker) -> Self {
         let installer = SpeechInstaller::new(data_dir, waker.clone());
+        let whistle = Whistle::native(installer.whistle_dir());
         let inner = Arc::new(Inner {
             service,
             waker,
             installer,
-            whistle: Whistle::native(),
+            whistle,
             started: Instant::now(),
             dynamic: Mutex::new(Dynamic {
                 snap: VoiceSnapshot::default(),
@@ -205,16 +206,27 @@ impl VoiceRuntime {
         let engines = engine::resolve(local);
         let ready_state = self.inner.service.setup();
         let (engine_ready, problem) = match engines.listening {
-            Listening::Whistle => match whistle::availability() {
-                Ok(()) => (true, String::new()),
-                Err(e) => (false, e.message()),
-            },
+            Listening::Whistle => {
+                match whistle::availability(&self.inner.installer.whistle_dir()) {
+                    Ok(()) => (true, String::new()),
+                    Err(e) => (false, e.message()),
+                }
+            }
             Listening::NeedsSetup => (false, engines.note.clone().unwrap_or_default()),
             _ => (true, engines.note.clone().unwrap_or_default()),
         };
         let speaker = match engines.speaking {
             Speaking::Realtime => "Realtime provider".to_owned(),
             Speaking::Windows => "Windows voice".to_owned(),
+            Speaking::Piper => match engine::piper_voice(local) {
+                Some(v)
+                    if install::piper_ready(self.inner.installer.storage(), v)
+                        || install::piper_bundled(install::bundle_dir().as_deref(), v) =>
+                {
+                    v.name.clone()
+                }
+                _ => "Windows voice \u{b7} Piper not installed".to_owned(),
+            },
             Speaking::Pack => own_tts(local).map_or("Speech pack voice".into(), |t| t.name),
             Speaking::External => format!("External server \u{b7} {}", local.tts_engine),
         };
@@ -552,6 +564,40 @@ impl VoiceRuntime {
                 Ok(Box::new(WindowsTts::new(&local.speech_language)))
             }
             Speaking::External => Ok(Box::new(HttpTts::from_options(local)?)),
+            Speaking::Piper => {
+                let Some(voice) = engine::piper_voice(local) else {
+                    return Ok(Box::new(WindowsTts::new(&local.speech_language)));
+                };
+                let bundle = install::bundle_dir();
+                if !install::piper_ready(storage, voice)
+                    && install::piper_bundled(bundle.as_deref(), voice)
+                    && install::cpp_runtime_present()
+                    && storage.begin()
+                {
+                    status("Preparing Piper\u{2026}");
+                    // A failure here only means the Windows voice speaks (checked below).
+                    let _ = install::install_piper_files(
+                        storage,
+                        voice,
+                        bundle.as_deref(),
+                        &AtomicBool::new(false),
+                        &mut |_, _| {},
+                    );
+                    storage.end();
+                }
+                if install::piper_ready(storage, voice) {
+                    Ok(Box::new(PiperTts {
+                        exe: storage.piper_exe(),
+                        model: storage.tts_path(voice),
+                        speaker: 0,
+                        length_scale: (1.0 / engine::piper_speed(local)) as f32,
+                        job: job.clone(),
+                    }))
+                } else {
+                    status("Piper is not installed \u{b7} the Windows voice speaks. Install it in Settings \u{2192} Voice \u{2192} Models.");
+                    Ok(Box::new(WindowsTts::new(&local.speech_language)))
+                }
+            }
             Speaking::Pack => {
                 let model = own_tts(local).map_err(|e| e.message().to_owned())?;
                 if model.id == "windows" {
@@ -569,6 +615,7 @@ impl VoiceRuntime {
                         exe: storage.piper_exe(),
                         model: storage.tts_path(&model),
                         speaker: model.speaker,
+                        length_scale: 1.0,
                         job: job.clone(),
                     }))
                 }
@@ -1339,7 +1386,31 @@ impl VoiceHost for VoiceBridge {
         lock(&self.runtime.inner.check).clone()
     }
     fn whistle_status(&self) -> String {
-        whistle::status_text()
+        whistle::status_text(&self.runtime.inner.installer.whistle_dir())
+    }
+    fn whistle_ready(&self) -> bool {
+        whistle::availability(&self.runtime.inner.installer.whistle_dir()).is_ok()
+    }
+    fn install_whistle(&self) {
+        self.runtime.inner.installer.install_whistle();
+    }
+    fn piper_status(&self, voice: &str) -> String {
+        let installer = &self.runtime.inner.installer;
+        match tts_by_id(voice) {
+            Ok(_) if installer.busy() => installer.storage().status(),
+            Ok(v) => install::piper_status_text(installer.storage(), v),
+            Err(_) => "Choose a Piper voice.".into(),
+        }
+    }
+    fn piper_ready(&self, voice: &str) -> bool {
+        tts_by_id(voice)
+            .is_ok_and(|v| install::piper_ready(self.runtime.inner.installer.storage(), v))
+    }
+    fn install_piper(&self, voice: &str) {
+        if self.runtime.active() {
+            self.runtime.end();
+        }
+        self.runtime.inner.installer.install_piper(voice);
     }
 }
 

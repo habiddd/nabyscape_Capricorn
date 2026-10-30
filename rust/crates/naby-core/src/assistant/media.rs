@@ -230,8 +230,7 @@ fn add_media(
         return Err(BadReply);
     }
     let mut mime = mime.to_string();
-    let attachment_source;
-    if source.starts_with("data:") {
+    let attachment_source = if source.starts_with("data:") {
         let split = source.find(';').ok_or(BadReply)?;
         if !(5..=100).contains(&split) {
             return Err(BadReply);
@@ -241,7 +240,7 @@ fn add_media(
             return Err(BadReply);
         }
         inline_payload(source, &mime).map_err(|_| BadReply)?;
-        attachment_source = AttachmentSource::Inline(source.to_string());
+        AttachmentSource::Inline(source.to_string())
     } else {
         let Ok(uri) = media_uri(source, &provider.base_url) else {
             return Ok(());
@@ -256,8 +255,8 @@ fn add_media(
                 _ => mime,
             };
         }
-        attachment_source = AttachmentSource::Remote(source.to_string());
-    }
+        AttachmentSource::Remote(source.to_string())
+    };
     let mut name: String = name.chars().filter(|c| !c.is_control()).take(180).collect();
     if name.is_empty() {
         name = format!("Image {}", files.len() + 1);

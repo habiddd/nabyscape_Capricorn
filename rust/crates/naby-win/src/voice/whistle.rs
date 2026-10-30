@@ -1,16 +1,17 @@
-//! Whistle, the built-in listening model: Cactus Compute `whistle.cact` run by the Cactus Needle
-//! engine `libneedle.dll` (user decision 2026-10-29).
+//! Whistle, the built-in listening model: Cactus Compute `whistle.cact` run by the Cactus
+//! Needle engine `needle.exe` (user decision 2026-10-29). Cactus publishes no Windows DLL, only
+//! `needle.exe` and a GCC static library, so each utterance runs `needle.exe --audio <wav>`.
 //!
-//! * The engine DLL is bound dynamically (never at startup): `LoadLibraryW` on a full path inside
-//!   the executable's own folder only, never the search path.
+//! * The two files sit next to `nabyscape.exe` (Setup / Portable) or in
+//!   `%LOCALAPPDATA%\NabyScape\local-speech\whistle`, where Settings > Models installs them.
 //! * Both files are checked against SHA-256 values pinned in `rust/whistle.lock`, which is
 //!   embedded in the executable. A lock that still says `TO_BE_PINNED` refuses to load unless the
 //!   build has debug assertions.
-//! * One worker thread owns the model (it is not thread-safe). The thread starts when voice
-//!   starts, and the model and DLL are unloaded 60 s after the last voice session ended. There is
-//!   no always-on Whistle loop: wake listening uses Windows speech recognition.
+//! * One worker thread owns the engine. The thread starts when voice starts and stops 60 s after
+//!   the last voice session ended. There is no always-on Whistle loop: wake listening uses Windows
+//!   speech recognition.
 //!
-//! Everything except the Win32 binding in [`native`] is platform-free and tested on Linux.
+//! Everything except the process launch in [`native`] is platform-free and tested on Linux.
 
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -23,12 +24,14 @@ use sha2::{Digest, Sha256};
 pub const EMBEDDED_LOCK: &str = include_str!("../../../../whistle.lock");
 /// Placeholder in `whistle.lock` until the release process pins real hashes.
 pub const UNPINNED: &str = "TO_BE_PINNED";
-/// The model file and engine DLL names (beside `nabyscape.exe`).
+/// The model file and engine program names.
 pub const MODEL_FILE: &str = "whistle.cact";
-pub const ENGINE_FILE: &str = "libneedle.dll";
+pub const ENGINE_FILE: &str = "needle.exe";
+/// The folder under `local-speech` that Settings installs Whistle into.
+pub const INSTALL_FOLDER: &str = "whistle";
 /// Whistle's input rate.
 pub const SAMPLE_RATE: u32 = 16_000;
-/// Idle time after voice ended before the model and DLL are unloaded.
+/// Idle time after voice ended before the engine worker stops.
 pub const IDLE_UNLOAD: Duration = Duration::from_secs(60);
 /// Output budget per second of audio for the result buffer. The Python wrapper sizes the buffer
 /// from the clip length; this is a generous constant (transcripts are a few hundred bytes a
@@ -59,6 +62,9 @@ pub struct LockEntry {
     /// `any`, `x64` or `arm64`.
     pub arch: String,
     pub url: String,
+    /// Exact download size; 0 when unknown.
+    #[serde(default)]
+    pub bytes: u64,
     pub sha256: String,
 }
 
@@ -94,7 +100,7 @@ impl Unavailable {
                 "Whistle is not available for this processor ({a}). Choose another listening engine."
             ),
             Self::Missing(f) => format!(
-                "Whistle needs {f} next to nabyscape.exe. Reinstall NabyScape or choose another listening engine."
+                "Whistle is not installed ({f} is missing). Install it in Settings \u{2192} Voice \u{2192} Models, or choose another listening engine."
             ),
             Self::Unpinned => "Whistle's files are not verified in this build (hashes in whistle.lock are not pinned yet). Use an official release or choose another listening engine.".into(),
             Self::HashMismatch(f) => format!(
@@ -183,7 +189,7 @@ pub fn current_arch() -> &'static str {
 }
 
 /// A cheap check (no hashing, nothing loaded) of whether Whistle can be used: both files sit
-/// next to the executable and the lock is pinned (or this is a debug build).
+/// in `folder` and the lock is pinned (or this is a debug build).
 pub fn availability_in(
     folder: &std::path::Path,
     lock: &Lock,
@@ -204,23 +210,36 @@ pub fn availability_in(
     Ok(())
 }
 
-/// [`availability_in`] for the running executable's folder.
-pub fn availability() -> Result<(), Unavailable> {
-    let lock = Lock::embedded()?;
-    let folder = std::env::current_exe()
+/// Where Whistle's files are used from: the executable's folder when the setup shipped them,
+/// otherwise `install` (the Settings install folder, which may not exist yet).
+pub fn locate(install: &std::path::Path) -> std::path::PathBuf {
+    let bundled = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-        .ok_or_else(|| Unavailable::Missing(ENGINE_FILE.into()))?;
-    availability_in(&folder, &lock, current_arch(), cfg!(debug_assertions))
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    bundled
+        .filter(|dir| {
+            [ENGINE_FILE, MODEL_FILE]
+                .iter()
+                .all(|n| dir.join(n).is_file())
+        })
+        .unwrap_or_else(|| install.to_path_buf())
+}
+
+/// [`availability_in`] for the folder [`locate`] picks.
+pub fn availability(install: &std::path::Path) -> Result<(), Unavailable> {
+    let lock = Lock::embedded()?;
+    availability_in(
+        &locate(install),
+        &lock,
+        current_arch(),
+        cfg!(debug_assertions),
+    )
 }
 
 /// The line the Models page and the voice room show for Whistle.
-pub fn status_text() -> String {
-    match availability() {
-        Ok(()) => {
-            "Ready \u{b7} loads when a conversation starts and unloads a minute after it ends."
-                .into()
-        }
+pub fn status_text(install: &std::path::Path) -> String {
+    match availability(install) {
+        Ok(()) => "Ready \u{b7} runs on this PC while a conversation is active.".into(),
         Err(e) => e.message(),
     }
 }
@@ -243,7 +262,7 @@ pub struct Transcript {
 }
 
 /// Anything that turns a finished utterance into text. [`WhistleLease`] implements it; the
-/// pipeline tests use fakes so no DLL is needed.
+/// pipeline tests use fakes so no engine is needed.
 pub trait Transcriber {
     fn transcribe(
         &mut self,
@@ -419,7 +438,7 @@ pub fn keywords_arg(keywords: &[String]) -> Option<String> {
 
 /// The native engine behind the worker (a fake in tests).
 pub trait Backend: Send {
-    /// Loads the DLL and model. Called once on the worker thread.
+    /// Verifies the engine and model. Called once on the worker thread.
     fn load(&mut self) -> Result<(), Unavailable>;
     fn transcribe(
         &mut self,
@@ -435,7 +454,7 @@ pub trait Backend: Send {
         keywords: Option<&str>,
     ) -> Result<String, String>;
     fn stream_stop(&mut self) -> Result<String, String>;
-    /// Unloads the model and the DLL.
+    /// Releases the engine.
     fn unload(&mut self);
 }
 
@@ -487,9 +506,13 @@ impl Whistle {
         }
     }
 
-    /// The production engine (Windows: `libneedle.dll`; elsewhere: always unavailable).
-    pub fn native() -> Self {
-        Self::new(Arc::new(|| native::backend()), IDLE_UNLOAD)
+    /// The production engine (Windows: `needle.exe`; elsewhere: always unavailable). `install`
+    /// is the Settings install folder (see [`locate`]).
+    pub fn native(install: std::path::PathBuf) -> Self {
+        Self::new(
+            Arc::new(move || native::backend(locate(&install))),
+            IDLE_UNLOAD,
+        )
     }
 
     /// Whether the worker (and so the model) is currently loaded.
@@ -757,196 +780,108 @@ mod native {
         fn unload(&mut self) {}
     }
 
-    pub fn backend() -> Box<dyn Backend> {
+    pub fn backend(_: std::path::PathBuf) -> Box<dyn Backend> {
         Box::new(Absent)
     }
+}
+
+/// A 16 kHz mono 16-bit PCM RIFF WAV of `pcm` (samples in [-1, 1], clamped), for `needle.exe`.
+pub fn wav_bytes(pcm: &[f32]) -> Vec<u8> {
+    let data = (pcm.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    out.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data.to_le_bytes());
+    for s in pcm {
+        out.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes());
+    }
+    out
+}
+
+/// The result JSON in `needle.exe`'s output: its last line that is a JSON object.
+pub fn last_json_line(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|l| l.starts_with('{') && l.ends_with('}'))
 }
 
 #[cfg(windows)]
 mod native {
     use super::*;
-    use std::ffi::{c_char, c_int, CStr, CString};
-    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
-    use windows::core::{PCSTR, PCWSTR};
-    use windows::Win32::Foundation::{FreeLibrary, HMODULE};
-    use windows::Win32::System::LibraryLoader::{
-        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
-        LOAD_LIBRARY_SEARCH_SYSTEM32,
-    };
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
 
-    type Load = unsafe extern "C" fn(*const c_char, u64) -> c_int;
-    type Transcribe = unsafe extern "C" fn(
-        *const f32,
-        c_int,
-        *const c_char,
-        *const c_char,
-        c_int,
-        *mut c_char,
-        c_int,
-    ) -> c_int;
-    type StreamProcess = unsafe extern "C" fn(
-        *const f32,
-        c_int,
-        *const c_char,
-        *const c_char,
-        *mut c_char,
-        c_int,
-    ) -> c_int;
-    type StreamStop = unsafe extern "C" fn(*mut c_char, c_int) -> c_int;
-    type LastError = unsafe extern "C" fn() -> *const c_char;
-
-    struct Api {
-        load: Load,
-        transcribe: Transcribe,
-        stream_process: StreamProcess,
-        stream_stop: StreamStop,
-        last_error: LastError,
-    }
+    /// `needle.exe` is a console program; never flash a console window.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    /// An utterance is at most 60 s of audio; a stuck engine is stopped after this.
+    const TIMEOUT: Duration = Duration::from_secs(90);
 
     pub struct Native {
-        module: Option<HMODULE>,
-        api: Option<Api>,
-        /// The `.cact` bytes stay alive while the engine may reference them.
-        model: Vec<u8>,
-        folder: Option<PathBuf>,
+        folder: PathBuf,
+        ready: bool,
     }
 
-    // SAFETY: the module handle and function pointers are only used on the one worker thread
-    // that owns the backend; the type moves there once, before `load`.
-    unsafe impl Send for Native {}
-
-    pub fn backend() -> Box<dyn Backend> {
+    pub fn backend(folder: PathBuf) -> Box<dyn Backend> {
         Box::new(Native {
-            module: None,
-            api: None,
-            model: Vec::new(),
-            folder: None,
+            folder,
+            ready: false,
         })
     }
 
-    /// The only place Whistle files are looked for: the folder of the running executable.
-    fn exe_folder() -> Option<PathBuf> {
-        std::env::current_exe()
-            .ok()?
-            .parent()
-            .map(Path::to_path_buf)
+    fn verify(lock: &Lock, folder: &Path, name: &str, arch: &str) -> Result<(), Unavailable> {
+        let bytes =
+            std::fs::read(folder.join(name)).map_err(|_| Unavailable::Missing(name.to_owned()))?;
+        lock.verify(name, arch, &bytes, cfg!(debug_assertions))
     }
 
-    fn read_verified(
-        lock: &Lock,
-        folder: &Path,
-        name: &str,
-        arch: &str,
-    ) -> Result<Vec<u8>, Unavailable> {
-        let path = folder.join(name);
-        let bytes = std::fs::read(&path).map_err(|_| Unavailable::Missing(name.to_owned()))?;
-        lock.verify(name, arch, &bytes, cfg!(debug_assertions))?;
-        Ok(bytes)
+    /// A temp file path unique to this process and call.
+    fn scratch(extension: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "nabyscape-whistle-{}-{}.{extension}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 
-    impl Native {
-        fn error(&self) -> String {
-            let Some(api) = &self.api else {
-                return String::new();
-            };
-            // SAFETY: `needle_last_error` returns NULL or a NUL-terminated string owned by the
-            // engine that stays valid until the next call on this thread.
-            unsafe {
-                let p = (api.last_error)();
-                if p.is_null() {
-                    String::new()
-                } else {
-                    CStr::from_ptr(p).to_string_lossy().into_owned()
-                }
-            }
-        }
+    /// Deletes a call's temp files however the call ends.
+    struct Scratch(Vec<PathBuf>);
 
-        fn run(
-            &mut self,
-            what: &str,
-            size: usize,
-            call: impl FnOnce(&Api, *mut c_char, c_int) -> c_int,
-        ) -> Result<String, String> {
-            let mut out = vec![0u8; size];
-            let code = {
-                let api = self.api.as_ref().ok_or("Whistle is not loaded.")?;
-                call(api, out.as_mut_ptr().cast(), out.len() as c_int)
-            };
-            if code < 0 {
-                let detail = self.error();
-                return Err(if detail.is_empty() {
-                    format!("Whistle {what} failed ({code}).")
-                } else {
-                    format!("Whistle {what} failed: {detail}")
-                });
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = std::fs::remove_file(path);
             }
-            let end = out.iter().position(|b| *b == 0).unwrap_or(out.len());
-            Ok(String::from_utf8_lossy(&out[..end]).into_owned())
         }
     }
 
-    fn proc<T>(module: HMODULE, name: &'static [u8]) -> Result<T, Unavailable> {
-        debug_assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<usize>());
-        // SAFETY: `name` is NUL terminated; the address is only transmuted to the documented
-        // C signature of the export it names.
-        unsafe {
-            let address = GetProcAddress(module, PCSTR(name.as_ptr()));
-            match address {
-                Some(f) => Ok(std::mem::transmute_copy::<_, T>(&f)),
-                None => Err(Unavailable::Load(format!(
-                    "{} is missing from the engine DLL.",
-                    String::from_utf8_lossy(&name[..name.len() - 1])
-                ))),
-            }
-        }
+    fn io(what: &str) -> impl Fn(std::io::Error) -> String + '_ {
+        move |e| format!("Whistle could not {what}: {e}")
     }
 
     impl Backend for Native {
         fn load(&mut self) -> Result<(), Unavailable> {
             let lock = Lock::embedded()?;
             let arch = current_arch();
-            let folder = exe_folder().ok_or_else(|| Unavailable::Missing(ENGINE_FILE.into()))?;
-            // Hash both files before anything is executed or parsed.
-            let _dll = read_verified(&lock, &folder, ENGINE_FILE, arch)?;
-            let model = read_verified(&lock, &folder, MODEL_FILE, arch)?;
-            drop(_dll);
-            let path = folder.join(ENGINE_FILE);
-            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-            // SAFETY: `wide` is a NUL-terminated absolute path in the exe folder. The flags make
-            // dependencies resolve from that folder and System32 only, never the search path.
-            let module = unsafe {
-                LoadLibraryExW(
-                    PCWSTR(wide.as_ptr()),
-                    None,
-                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
-                )
-            }
-            .map_err(|e| Unavailable::Load(e.message()))?;
-            self.module = Some(module);
-            self.folder = Some(folder);
-            let api = Api {
-                load: proc(module, b"needle_load\0")?,
-                transcribe: proc(module, b"needle_transcribe\0")?,
-                stream_process: proc(module, b"needle_stream_transcribe_process\0")?,
-                stream_stop: proc(module, b"needle_stream_transcribe_stop\0")?,
-                last_error: proc(module, b"needle_last_error\0")?,
-            };
-            self.api = Some(api);
-            self.model = model;
-            let code = {
-                let api = self.api.as_ref().expect("api just set");
-                // SAFETY: the pointer and length describe `self.model`, which outlives the engine.
-                unsafe { (api.load)(self.model.as_ptr().cast(), self.model.len() as u64) }
-            };
-            if code < 0 {
-                let detail = self.error();
-                return Err(Unavailable::Load(if detail.is_empty() {
-                    format!("the model was rejected ({code})")
-                } else {
-                    detail
-                }));
-            }
+            // Hash both files before anything is executed.
+            // shortcut: not re-hashed per utterance, so a writer in the user's own profile could
+            // swap needle.exe while voice is active; re-verify per call if the folder is shared.
+            verify(&lock, &self.folder, ENGINE_FILE, arch)?;
+            verify(&lock, &self.folder, MODEL_FILE, arch)?;
+            self.ready = true;
             Ok(())
         }
 
@@ -957,90 +892,85 @@ mod native {
             keywords: Option<&str>,
             words: bool,
         ) -> Result<String, String> {
+            if !self.ready {
+                return Err("Whistle is not loaded.".into());
+            }
+            let (wav, out, err) = (scratch("wav"), scratch("out"), scratch("err"));
+            let mut files = Scratch(vec![wav.clone(), out.clone(), err.clone()]);
+            std::fs::write(&wav, wav_bytes(pcm)).map_err(io("write the audio"))?;
+            let mut command = Command::new(self.folder.join(ENGINE_FILE));
+            command
+                .arg("--model")
+                .arg(self.folder.join(MODEL_FILE))
+                .arg("--audio")
+                .arg(&wav);
             let language = language
-                .map(CString::new)
-                .transpose()
-                .map_err(|_| "Bad language.")?;
-            let keywords = keywords
-                .map(CString::new)
-                .transpose()
-                .map_err(|_| "Bad keywords.")?;
-            self.run(
-                "transcription",
-                output_buffer_len(pcm.len()),
-                |api, out, len| {
-                    // SAFETY: all pointers are valid for the stated lengths for the call duration.
-                    unsafe {
-                        (api.transcribe)(
-                            pcm.as_ptr(),
-                            pcm.len() as c_int,
-                            language.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
-                            keywords.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
-                            c_int::from(words),
-                            out,
-                            len,
-                        )
+                .map(|l| l.trim().to_ascii_lowercase())
+                .map(|l| l.split(['-', '_']).next().unwrap_or("").to_owned())
+                .filter(|l| supports_language(l));
+            if let Some(language) = &language {
+                command.args(["--audio-language", language]);
+            }
+            if let Some(keywords) = keywords {
+                let list = scratch("txt");
+                files.0.push(list.clone());
+                std::fs::write(&list, keywords).map_err(io("write the keywords"))?;
+                command.arg("--audio-keywords").arg(&list);
+            }
+            if words {
+                command.arg("--audio-word-timestamps");
+            }
+            let stdout = std::fs::File::create(&out).map_err(io("start"))?;
+            let stderr = std::fs::File::create(&err).map_err(io("start"))?;
+            let mut child = command
+                .current_dir(&self.folder)
+                .stdin(Stdio::null())
+                .stdout(stdout)
+                .stderr(stderr)
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map_err(io("start"))?;
+            let started = Instant::now();
+            let status = loop {
+                match child.try_wait().map_err(io("run"))? {
+                    Some(status) => break status,
+                    None if started.elapsed() > TIMEOUT => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err("Whistle took too long and was stopped.".into());
                     }
-                },
-            )
+                    None => std::thread::sleep(Duration::from_millis(10)),
+                }
+            };
+            let text = std::fs::read_to_string(&out).unwrap_or_default();
+            if !status.success() {
+                let detail = std::fs::read_to_string(&err).unwrap_or_default();
+                let detail = detail.lines().map(str::trim).rfind(|l| !l.is_empty());
+                return Err(match detail {
+                    Some(d) => format!("Whistle transcription failed: {d}"),
+                    None => format!("Whistle transcription failed ({status})."),
+                });
+            }
+            last_json_line(&text)
+                .map(str::to_owned)
+                .ok_or_else(|| "Whistle returned no result.".into())
         }
 
         fn stream_process(
             &mut self,
-            pcm: &[f32],
-            language: Option<&str>,
-            keywords: Option<&str>,
+            _: &[f32],
+            _: Option<&str>,
+            _: Option<&str>,
         ) -> Result<String, String> {
-            let language = language
-                .map(CString::new)
-                .transpose()
-                .map_err(|_| "Bad language.")?;
-            let keywords = keywords
-                .map(CString::new)
-                .transpose()
-                .map_err(|_| "Bad keywords.")?;
-            self.run(
-                "streaming",
-                output_buffer_len(pcm.len()),
-                |api, out, len| {
-                    // SAFETY: as for `transcribe`.
-                    unsafe {
-                        (api.stream_process)(
-                            pcm.as_ptr(),
-                            pcm.len() as c_int,
-                            language.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
-                            keywords.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
-                            out,
-                            len,
-                        )
-                    }
-                },
-            )
+            Err("Live transcription is not available with needle.exe.".into())
         }
 
         fn stream_stop(&mut self) -> Result<String, String> {
-            self.run("streaming", OUTPUT_FLOOR, |api, out, len| {
-                // SAFETY: `out` is valid for `len` bytes.
-                unsafe { (api.stream_stop)(out, len) }
-            })
+            Err("Live transcription is not available with needle.exe.".into())
         }
 
         fn unload(&mut self) {
-            self.api = None;
-            self.model = Vec::new();
-            if let Some(module) = self.module.take() {
-                // SAFETY: the module handle came from LoadLibraryExW and no function pointer
-                // from it is used after `api` was cleared.
-                unsafe {
-                    let _ = FreeLibrary(module);
-                }
-            }
-        }
-    }
-
-    impl Drop for Native {
-        fn drop(&mut self) {
-            self.unload();
+            self.ready = false;
         }
     }
 }
@@ -1048,6 +978,71 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real engine: `NABY_WHISTLE_DIR` holds the pinned `needle.exe` and `whistle.cact`, and
+    /// `NABY_WHISTLE_WAV` a 16 kHz mono 16-bit clip of speech.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "needs the Whistle files; set NABY_WHISTLE_DIR and NABY_WHISTLE_WAV"]
+    fn the_real_engine_transcribes_a_clip() {
+        let folder = std::path::PathBuf::from(std::env::var("NABY_WHISTLE_DIR").unwrap());
+        let wav = std::fs::read(std::env::var("NABY_WHISTLE_WAV").unwrap()).unwrap();
+        let pcm: Vec<f32> = wav[44..]
+            .chunks_exact(2)
+            .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
+            .collect();
+        assert_eq!(
+            availability_in(&folder, &Lock::embedded().unwrap(), "x64", false),
+            Ok(())
+        );
+        let whistle = Whistle::new(
+            Arc::new(move || native::backend(folder.clone())),
+            Duration::from_secs(1),
+        );
+        let mut lease = whistle.acquire().unwrap();
+        let keywords = keyword_list("Hey Naby", &[]);
+        let heard = lease.transcribe(&pcm, Some("es-ES"), &keywords).unwrap();
+        println!("{heard:?}");
+        assert_eq!(heard.language.as_deref(), Some("es"));
+        assert!(
+            heard.text.to_lowercase().contains("temporizador"),
+            "{}",
+            heard.text
+        );
+    }
+
+    #[test]
+    fn wav_bytes_is_a_16_khz_mono_pcm_riff_with_clamped_samples() {
+        let wav = wav_bytes(&[0.0, 1.0, -2.0]);
+        assert_eq!(wav.len(), 44 + 6);
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()), 36 + 6);
+        assert_eq!(&wav[8..16], b"WAVEfmt ");
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
+        assert_eq!(&wav[36..40], b"data");
+        let samples: Vec<i16> = wav[44..]
+            .chunks(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(samples, [0, 32767, -32767]);
+    }
+
+    #[test]
+    fn the_result_is_the_last_json_line_of_the_output() {
+        let out = "loading whistle.cact
+{\"text\":\"a\"}
+{\"text\":\"Hola\",\"language\":\"es\"}
+";
+        assert_eq!(
+            last_json_line(out),
+            Some("{\"text\":\"Hola\",\"language\":\"es\"}")
+        );
+        assert_eq!(
+            parse_result(last_json_line(out).unwrap()).unwrap().text,
+            "Hola"
+        );
+        assert_eq!(last_json_line("usage: needle"), None);
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn hex(bytes: &[u8]) -> String {
@@ -1061,8 +1056,8 @@ mod tests {
         Lock::parse(&format!(
             r#"[
             {{"name":"whistle.cact","arch":"any","url":"https://huggingface.co/a/b","sha256":"{model_hash}"}},
-            {{"name":"libneedle.dll","arch":"x64","url":"https://huggingface.co/c/d","sha256":"{dll_hash}"}},
-            {{"name":"libneedle.dll","arch":"arm64","url":"https://huggingface.co/e/f","sha256":"TO_BE_PINNED"}}]"#
+            {{"name":"needle.exe","arch":"x64","url":"https://huggingface.co/c/d","sha256":"{dll_hash}"}},
+            {{"name":"needle.exe","arch":"arm64","url":"https://huggingface.co/e/f","sha256":"TO_BE_PINNED"}}]"#
         ))
         .unwrap()
     }
@@ -1073,10 +1068,10 @@ mod tests {
         assert_eq!(lock.entries().len(), 3);
         let model = lock.entry(MODEL_FILE, "x64").unwrap();
         assert_eq!(model.arch, "any");
-        assert_eq!(
-            model.url,
-            "https://huggingface.co/Cactus-Compute/whistle/resolve/main/whistle.cact"
-        );
+        assert!(model
+            .url
+            .starts_with("https://huggingface.co/Cactus-Compute/whistle/resolve/"));
+        assert!(lock.entries().iter().all(LockEntry::pinned));
         assert!(lock
             .entry(ENGINE_FILE, "x64")
             .unwrap()

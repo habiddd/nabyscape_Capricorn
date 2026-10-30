@@ -309,6 +309,9 @@ fn build_tts() -> Vec<TtsModel> {
         tts("es_ES-sharvard-medium", "Piper · Spanish", "es/es_ES/sharvard/medium", 76733615, ("40febfb1679c69a4505ff311dc136e121e3419a13a290ef264fdf43ddedd0fb1", "7438c9b699c72b0c3388dae1b68d3f364dc66a2150fe554a1c11f03372957b2c", "37655314d08fe8a0900abc628d3bcbee48ffbdd8fad9306b89525a0ada20fefc"), None, "", 0.4, "piper", "", ""),
         tts("kitten-nano-v0.8-int8-en", "KittenTTS nano v0.8 INT8 · light English", "", 31220690, ("", "", ""), Some(release_model("kitten-nano-en-v0_8-int8", 31220690, "6fa5be852612ce761094ba74ee6123b4fc4acfefa79bf64dc63acae4a83af2fd", true)), "en", 0.35, "kitten", "kitten-nano-en-v0_8-int8", "Compact English CPU voice · no reference recording needed"),
         tts("supertonic-3-int8", "Supertonic 3 INT8 · 2026 multilingual", "", 128774318, ("", "", ""), Some(release_model("sherpa-onnx-supertonic-3-tts-int8-2026-05-11", 128774318, "82fa96f91c4ef8abaae3a14a3f4153facf88bed821d1f7331cec2700f432c427", true)), "multi", 1.0, "supertonic", "sherpa-onnx-supertonic-3-tts-int8-2026-05-11", "2026 multilingual CPU voice · preset speaker · OpenRAIL-M model license; read its terms before use"),
+        tts("es_MX-ald-x_low", "Piper · Spanish (Latin America) · smallest", "es/es_MX/ald/x_low", 20986952, ("d8aae54aee9eafb37fb85d6da676facafca31c2d84d11acdca1a5b6dd82b1df6", "5b372adf1f8c8d8f0610b9057fc2df001ad3f5f42cd9d6f853a78bef3f8b0644", "75de85e71247db75274624efd6d816babf37cfd34358abed402b0e979f4aa5b9"), None, "", 0.2, "piper", "", "Included with NabyScape · lowest memory"),
+        tts("es_ES-carlfm-x_low", "Piper · Spanish (Spain) · small", "es/es_ES/carlfm/x_low", 28130791, ("d69677323a907cd4963f42b29c20a98b5d6bfa7f3e64df339915e4650c00d125", "d9bdfa9ff01eb2bc9e62e7d2593939d1e4c4d8eb7cf75f972731539d12399966", "a6e62a3d36c37c7702d877f784001208b952e2bf4d17c72a6b5da442fbefb4b3"), None, "", 0.2, "piper", "", "Small Spanish (Spain) voice"),
+        tts("en_US-amy-low", "Piper · English (US) · small", "en/en_US/amy/low", 63104526, ("a5a91abb7de0f104358a25aded480ddacf1ff0762886325886ec406a2e86aab3", "2250a9a605b8dc35a116717fadc5056695dd809e34a15d02f72a0f52d53d3ebb", "71b07ded301a96346096a71d8f0d64cbb5f49d5d51004dce28bbb7504e3f65f0"), None, "", 0.3, "piper", "", "Smallest English Piper voice"),
     ]
 }
 
@@ -1141,7 +1144,13 @@ mod tests {
     #[test]
     fn catalog_is_complete_unique_and_pinned() {
         assert_eq!(asr_models().len(), 13);
-        assert_eq!(tts_models().len(), 7);
+        assert_eq!(tts_models().len(), 10);
+        let ald = tts_by_id("es_MX-ald-x_low").unwrap();
+        assert_eq!(ald.language(), "es");
+        assert_eq!(
+            voice_url(ald, ".onnx"),
+            format!("https://huggingface.co/rhasspy/piper-voices/resolve/{PIPER_REVISION}/es/es_MX/ald/x_low/es_MX-ald-x_low.onnx")
+        );
         let mut ids: Vec<&str> = asr_models().iter().map(|m| m.id.as_str()).collect();
         ids.sort_unstable();
         ids.dedup();

@@ -11,3 +11,6 @@ fontdue.workspace = true
 png.workspace = true
 zune-jpeg.workspace = true
 naby-core.workspace = true
+
+[lints]
+workspace = true

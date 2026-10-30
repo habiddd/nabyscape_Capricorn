@@ -651,6 +651,8 @@ pub struct PiperTts {
     pub exe: PathBuf,
     pub model: PathBuf,
     pub speaker: i32,
+    /// Piper's `--length_scale`: above 1.0 speaks slower, below 1.0 faster.
+    pub length_scale: f32,
     pub job: std::sync::Arc<Job>,
 }
 
@@ -672,7 +674,16 @@ impl Speaker for PiperTts {
             return Ok(Vec::new());
         }
         let mut command = native_command(&self.exe);
-        command.arg("--model").arg(&self.model).arg("--output-raw");
+        command
+            .arg("--model")
+            .arg(&self.model)
+            .arg("--output-raw")
+            .arg("--quiet");
+        if (self.length_scale - 1.0).abs() > 0.01 {
+            command
+                .arg("--length_scale")
+                .arg(format!("{:.2}", self.length_scale));
+        }
         if self.speaker > 0 {
             command.arg("--speaker").arg(self.speaker.to_string());
         }

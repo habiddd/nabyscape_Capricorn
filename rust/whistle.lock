@@ -2,19 +2,22 @@
   {
     "name": "whistle.cact",
     "arch": "any",
-    "url": "https://huggingface.co/Cactus-Compute/whistle/resolve/main/whistle.cact",
-    "sha256": "TO_BE_PINNED"
+    "url": "https://huggingface.co/Cactus-Compute/whistle/resolve/741118687e1f008f06d1351a402a731274789790/whistle.cact",
+    "bytes": 16919407,
+    "sha256": "b6e02f048568ac5d01a2042556c658061e699acbc0aa2a1439f52f3d461dffeb"
   },
   {
-    "name": "libneedle.dll",
+    "name": "needle.exe",
     "arch": "x64",
-    "url": "https://huggingface.co/Cactus-Compute/needle3/resolve/main/windows-x86_64/libneedle.dll",
-    "sha256": "TO_BE_PINNED"
+    "url": "https://huggingface.co/Cactus-Compute/needle3/resolve/d6c7d6a2e9655505e0f8e23339356dd1705900eb/windows-x86_64/needle.exe",
+    "bytes": 1570816,
+    "sha256": "0d4bc1da8c51f5600f5c4f4bb4a92e0abe142fae7b69e695ccab93e6745c883d"
   },
   {
-    "name": "libneedle.dll",
+    "name": "needle.exe",
     "arch": "arm64",
-    "url": "https://huggingface.co/Cactus-Compute/needle3/resolve/main/windows-arm64/libneedle.dll",
-    "sha256": "TO_BE_PINNED"
+    "url": "https://huggingface.co/Cactus-Compute/needle3/resolve/d6c7d6a2e9655505e0f8e23339356dd1705900eb/windows-arm64/needle.exe",
+    "bytes": 1359360,
+    "sha256": "64a0e0d269fbc87e839551a5396575b604e77706e9ad18dd2969c30e97f752df"
   }
 ]

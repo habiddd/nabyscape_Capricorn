@@ -235,6 +235,13 @@ fn resolve(
     staging_name.push(format!(".migration-{}", unique_suffix()));
     let staging = PathBuf::from(staging_name);
     let result = stage(&legacy, &destination, &staging, extra).and_then(|()| {
+        // Windows rename replaces a file at the destination (Linux refuses), so refuse it here.
+        if fs::symlink_metadata(&destination).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Something already exists where the data folder must go.",
+            ));
+        }
         // A same-volume directory rename publishes only the fully copied and validated tree.
         fs::rename(&staging, &destination)
     });

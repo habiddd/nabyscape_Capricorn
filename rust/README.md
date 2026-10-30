@@ -40,7 +40,7 @@ Command line of `nabyscape.exe`:
 | `--uninstall [--quiet] [--keep-data]` | remove the app (and, by default, its data and models) |
 | `--update-handoff` | the update helper (started by the app, never by hand) |
 | `--update-started <token>` | acknowledges a start to the update helper |
-| `--self-test [--report <file>] [--require-payload]` | store, defaults, fonts, version resource, Whistle files; exit code 0 = healthy |
+| `--self-test [--report <file>] [--require-payload]` | store, defaults, fonts, version resource, Whistle and Piper files; exit code 0 = healthy |
 | `--widget-mcp` | serve the widget pages over MCP on stdio |
 
 ## Architecture
@@ -110,9 +110,35 @@ CSV. Task Manager's default "Memory" column is the private working set too.
 ## How Whistle is packaged
 
 The default listening model is Cactus Compute Whistle: `whistle.cact` (model) run by the Cactus
-Needle engine `libneedle.dll` (per architecture). Both ship next to `nabyscape.exe`, so there is
-no first-run download. `whistle.lock` (written by the voice task) is a JSON array of
-`{ "name", "arch" ("any"|"x64"|"arm64"), "url", "sha256" }`.
+Needle engine `needle.exe` (per architecture). Cactus publishes no Windows DLL (only `needle.exe`
+and a GCC static library that does not link with MSVC), so each utterance is written to a temp
+WAV and transcribed by `needle.exe --model whistle.cact --audio <wav>` (about 1 s, model load
+included). Both files ship next to `nabyscape.exe` in the Setup and Portable packages; when they
+are missing (a bare exe, a development build), **Settings > Voice > Models > Install Whistle**
+downloads them to `%LOCALAPPDATA%\NabyScape\local-speech\whistle`. `whistle.lock` is a JSON array
+of `{ "name", "arch" ("any"|"x64"|"arm64"), "url", "bytes", "sha256" }`, pinned to Hugging Face
+commits; both the release script and the install button verify size and SHA-256.
+
+## How Piper is packaged
+
+The default speaking voice is Piper with the smallest Spanish voice, `es_MX-ald-x_low`. On x64 the
+Setup and Portable packages carry `piper_windows_amd64.zip` (the pinned engine, unmodified), the
+voice's `.onnx`, `.onnx.json` and `.onnx.MODEL_CARD`, and `PIPER-NOTICE.txt` (eSpeak NG is GPL-3.0,
+so the notice links its source). `piper.lock` pins them like `whistle.lock`. On first use the app
+copies and verifies them into `%LOCALAPPDATA%\NabyScape\local-speech`, so nothing is downloaded;
+without them, **Install Piper** (Voice setup > Speaking, or Models) downloads the same pinned files.
+Piper starts one `piper.exe` per sentence, so it uses memory only while Naby speaks. Voice and
+speed are set in Voice setup > Speaking. Check it with
+`cargo test -p naby-win --lib piper_installs_and_speaks_spanish -- --ignored --nocapture`
+(`NABY_PIPER_BUNDLE` = the folder with the shipped files, `NABY_PIPER_WAV` = a file to keep).
+
+Real-engine checks (Windows, not part of the normal test run):
+
+```
+cargo test -p naby-win --lib whistle_installs_from_the_embedded_lock -- --ignored
+$env:NABY_WHISTLE_DIR = "<folder with needle.exe + whistle.cact>"; $env:NABY_WHISTLE_WAV = "<16 kHz mono 16-bit Spanish clip that says 'temporizador'>"
+cargo test -p naby-win --lib the_real_engine -- --ignored --nocapture
+```
 
 `build-release.ps1 -Tag vX.Y.Z` builds both architectures, downloads the pinned files, verifies
 each SHA-256 (it stops if the lock file is missing or a hash differs), checks the DLL's PE
@@ -141,9 +167,9 @@ item is the biggest one.
   WASAPI audio/loopback/capture/playback, mixer, WMI (hardware, brightness), clipboard listener,
   downloads watcher, launcher icons, OLE drag-drop, GDI capture, DWM backdrops, file dialogs,
   Credential Manager, install/uninstall/update helpers, WinVerifyTrust, Windows speech recognition.
-- `rust/whistle.lock` hashes are `TO_BE_PINNED`; `build-release.ps1` pins them, and the pinned lock
-  must be committed. The exact `libneedle.dll` path inside the HF `needle3` platform folders and the
-  Whistle weight licence were not verifiable from the build environment.
+- `rust/whistle.lock` is pinned and the Whistle path (install, hash check, `needle.exe`
+  transcription) was run on Windows 11 x64; ARM64 `needle.exe` was not executed. The Whistle weight
+  licence is still unverified.
 - Memory has not been measured; use `tools/measure-memory.ps1`. Target: idle dock ≤ 30 MB private.
 
 ### Behavior differences from the C# 2.24 build
@@ -166,8 +192,11 @@ item is the biggest one.
 - The interactive installer uses standard dialogs instead of the WPF installer window; a rollback
   restores the exe and profile but keeps the newer Whistle files.
 - Voice: wake listening uses the Windows default microphone (Windows.Media.SpeechRecognition has no
-  input selection); live captions do not use Whistle's streaming API yet; realtime image sharing has
+  input selection); live captions do not use Whistle's streaming (`needle.exe` has no per-chunk API, so the backend returns an error for streaming); realtime image sharing has
   no UI button; ARM64 native speech packs stay unavailable, as in C#.
+- Piper is x64 only (no ARM64 Windows build; ARM64 keeps the Windows voice). Only the Spanish (Latin
+  America) voice ships; `es_ES-carlfm-x_low` and `en_US-amy-low` are downloads. Each sentence loads
+  the voice again (a short delay per sentence, in exchange for no resident memory).
 - Whistle covers en/de/fr/es/it/nl/pl only; other languages (e.g. Indonesian) need a speech pack,
   external server or realtime provider.
 - Assistant attachments: Office text extraction is supported (DOCX/PPTX/XLSX/ODT); PDF/video frame

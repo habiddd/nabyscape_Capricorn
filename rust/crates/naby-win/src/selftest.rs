@@ -3,7 +3,7 @@
 //! document in a temp folder, the bundled defaults normalize, system fonts load, the version
 //! resource matches the package version, and the Whistle files sit next to the executable.
 //!
-//! Exit code 0 when no check failed. Missing Whistle files only fail with `--require-payload`
+//! Exit code 0 when no check failed. Missing Whistle or Piper files only fail with `--require-payload`
 //! (the release script passes it), so a plain `cargo run` build still self-tests.
 
 use std::path::{Path, PathBuf};
@@ -60,10 +60,16 @@ pub fn fonts_load() -> Outcome {
     }
 }
 
-/// Payload files expected beside `exe_dir` (`libneedle.dll`, `whistle.cact`).
+/// Payload files expected beside `exe_dir`: Whistle's, plus Piper's on x64.
 pub fn payload_present(exe_dir: &Path, require: bool) -> Outcome {
-    let missing: Vec<&str> = ["libneedle.dll", "whistle.cact"]
+    let piper: &[&str] = if cfg!(target_arch = "x86_64") {
+        &crate::voice::install::PIPER_BUNDLE
+    } else {
+        &[]
+    };
+    let missing: Vec<&str> = ["needle.exe", "whistle.cact"]
         .into_iter()
+        .chain(piper.iter().copied())
         .filter(|name| !exe_dir.join(name).is_file())
         .collect();
     match (missing.is_empty(), require) {
@@ -119,7 +125,7 @@ pub fn run_checks(require_payload: bool) -> Vec<Check> {
             outcome: version_resource(),
         },
         Check {
-            name: "whistle payload",
+            name: "speech payload",
             outcome: payload_present(&exe_dir, require_payload),
         },
     ]
@@ -172,8 +178,17 @@ mod tests {
             payload_present(dir.path(), true),
             Outcome::Fail(_)
         ));
-        std::fs::write(dir.path().join("libneedle.dll"), b"x").unwrap();
+        std::fs::write(dir.path().join("needle.exe"), b"x").unwrap();
         std::fs::write(dir.path().join("whistle.cact"), b"x").unwrap();
+        if cfg!(target_arch = "x86_64") {
+            assert!(matches!(
+                payload_present(dir.path(), true),
+                Outcome::Fail(m) if m.contains("piper_windows_amd64.zip")
+            ));
+            for name in crate::voice::install::PIPER_BUNDLE {
+                std::fs::write(dir.path().join(name), b"x").unwrap();
+            }
+        }
         assert_eq!(payload_present(dir.path(), true), Outcome::Pass);
     }
 

@@ -37,6 +37,8 @@ struct Calls {
     mic_tests: Vec<bool>,
     scans: usize,
     cancels: usize,
+    whistle_installs: usize,
+    piper_installs: Vec<String>,
 }
 
 struct Scripted {
@@ -45,6 +47,8 @@ struct Scripted {
     check: Mutex<AudioCheck>,
     mic: Mutex<MicTest>,
     calls: Mutex<Calls>,
+    whistle_ready: AtomicBool,
+    piper_ready: AtomicBool,
 }
 
 impl Scripted {
@@ -55,6 +59,8 @@ impl Scripted {
             check: Mutex::default(),
             mic: Mutex::default(),
             calls: Mutex::default(),
+            whistle_ready: AtomicBool::new(true),
+            piper_ready: AtomicBool::new(true),
         })
     }
 
@@ -153,6 +159,25 @@ impl VoiceHost for Scripted {
     }
     fn whistle_status(&self) -> String {
         "Ready \u{b7} loads when a conversation starts.".into()
+    }
+    fn whistle_ready(&self) -> bool {
+        self.whistle_ready.load(Ordering::SeqCst)
+    }
+    fn install_whistle(&self) {
+        self.calls.lock().unwrap().whistle_installs += 1;
+    }
+    fn piper_status(&self, _: &str) -> String {
+        if self.piper_ready("") {
+            "Ready".into()
+        } else {
+            "Included with NabyScape".into()
+        }
+    }
+    fn piper_ready(&self, _: &str) -> bool {
+        self.piper_ready.load(Ordering::SeqCst)
+    }
+    fn install_piper(&self, voice: &str) {
+        self.calls.lock().unwrap().piper_installs.push(voice.into());
     }
 }
 
@@ -454,9 +479,9 @@ fn thinking_speaking_error_and_wake_snapshots() {
     rig.host.set(|s| {
         s.active = false;
         s.phase = State::Error;
-        s.status = "Voice stopped. Whistle needs libneedle.dll next to nabyscape.exe.".into();
+        s.status = "Voice stopped. Whistle needs needle.exe next to nabyscape.exe.".into();
         s.engine_ready = false;
-        s.engine_problem = "Whistle needs libneedle.dll next to nabyscape.exe.".into();
+        s.engine_problem = "Whistle needs needle.exe next to nabyscape.exe.".into();
     });
     rig.room_frame(&mut room, InputState::default());
     save("voice-room-error", &rig.canvas);
@@ -572,6 +597,10 @@ fn voice_setup_defaults_to_whistle_and_saves_other_engines() {
         super::engine::Listening::Whistle
     );
     assert!(local.sensitivity >= 0.003);
+    assert_eq!(
+        super::engine::speaking(&local),
+        super::engine::Speaking::Piper
+    );
 
     // A bad external address is rejected without touching the saved options.
     let mut external = VoiceSettingsView::new(rig.f.service.clone(), rig.host.clone());
@@ -593,6 +622,44 @@ fn voice_setup_defaults_to_whistle_and_saves_other_engines() {
         rig.f.service.options().local_voice.asr_url,
         "https://remote.example/"
     );
+}
+
+#[test]
+fn piper_control_saves_voice_and_speed_and_offers_install() {
+    let Some(mut rig) = Rig::new(VoiceSnapshot::default()) else {
+        return;
+    };
+    rig.f
+        .service
+        .edit_options(|o| {
+            o.local_voice.speech_language = "es".into();
+            Ok(())
+        })
+        .unwrap();
+    let mut view = VoiceSettingsView::new(rig.f.service.clone(), rig.host.clone());
+    view.set_piper_choice("es_ES-carlfm-x_low", 1.25);
+    view.save_setup().unwrap();
+    let local = rig.f.service.options().local_voice;
+    assert_eq!(local.extra["PiperVoice"], json!("es_ES-carlfm-x_low"));
+    assert_eq!(local.extra["PiperSpeed"], json!(1.25));
+    assert_eq!(
+        super::engine::piper_voice(&local).unwrap().id,
+        "es_ES-carlfm-x_low"
+    );
+    assert_eq!(
+        super::engine::speaking(&local),
+        super::engine::Speaking::Piper
+    );
+    // Missing files: the setup and Models pages offer the install.
+    rig.host.piper_ready.store(false, Ordering::SeqCst);
+    let mut view = VoiceSettingsView::new(rig.f.service.clone(), rig.host.clone());
+    rig.settings_frame(&mut view, InputState::default());
+    save("voice-settings-piper-missing", &rig.canvas);
+    assert!(rig.ink() > 3000);
+    view.open(VoicePage::Models);
+    rig.settings_frame(&mut view, InputState::default());
+    save("voice-settings-models-piper-missing", &rig.canvas);
+    assert!(rig.ink() > 3000);
 }
 
 #[test]
@@ -681,6 +748,12 @@ fn models_page_shows_whistle_packs_and_removes_with_confirmation() {
         view.dirty(),
         "an install in progress keeps the page repainting"
     );
+    // Without Whistle's files the page offers to install it.
+    rig.host.whistle_ready.store(false, Ordering::SeqCst);
+    rig.host.panel.lock().unwrap().busy = false;
+    rig.settings_frame(&mut view, InputState::default());
+    save("voice-settings-models-whistle-missing", &rig.canvas);
+    assert!(rig.ink() > 3000);
 }
 
 #[test]

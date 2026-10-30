@@ -3,13 +3,15 @@
 //! Whistle (built in) is the default listening engine for English, German, French, Spanish,
 //! Italian, Dutch and Polish, with automatic language detection. A language outside those, or an
 //! explicit choice of a speech pack, own model files, an external server or a realtime provider,
-//! uses that instead. Speaking is unchanged: Windows speech, a pack voice, or an external TTS.
+//! uses that instead. Speaking defaults to built-in Piper (one `piper.exe` per sentence, so it
+//! holds no memory between sentences); Windows speech, a pack voice or an external TTS are choices.
 //!
-//! The choice lives in the unknown-key map of `LocalVoiceOptions` (`ListeningEngine`), so older
+//! The choices live in the unknown-key map of `LocalVoiceOptions` (`ListeningEngine`,
+//! `SpeakingEngine`, `PiperVoice`, `PiperSpeed`), so older
 //! `assistant.json` files keep working and nothing new needs modeling in `naby-core`.
 
 use naby_core::assistant::models::{LocalVoiceOptions, Options};
-use naby_core::assistant::speech::{asr_by_id, language_name, own_asr};
+use naby_core::assistant::speech::{asr_by_id, language_name, own_asr, tts_models, TtsModel};
 use serde_json::Value;
 
 /// Languages Whistle recognizes (auto-detect between them).
@@ -17,6 +19,10 @@ pub const WHISTLE_LANGUAGES: [&str; 7] = ["en", "de", "fr", "es", "it", "nl", "p
 
 /// The unknown-key name that stores an explicit choice.
 pub const KEY: &str = "ListeningEngine";
+/// The unknown-key names for the speaking choice, the Piper voice and its speed.
+pub const SPEAKING_KEY: &str = "SpeakingEngine";
+pub const PIPER_VOICE_KEY: &str = "PiperVoice";
+pub const PIPER_SPEED_KEY: &str = "PiperSpeed";
 
 /// Whether Whistle can listen in `code` (`en`, `de-DE`, ...).
 pub fn whistle_supports(code: &str) -> bool {
@@ -67,6 +73,8 @@ pub enum Speaking {
     Realtime,
     /// Windows.Media.SpeechSynthesis.
     Windows,
+    /// Built-in Piper, one process per sentence.
+    Piper,
     /// A pack voice (Piper, Kokoro, Kitten, Supertonic).
     Pack,
     /// An external TTS server.
@@ -159,11 +167,82 @@ pub fn speaking(local: &LocalVoiceOptions) -> Speaking {
         Speaking::Realtime
     } else if local.managed && local.managed_tts != "windows" {
         Speaking::Pack
-    } else if local.managed || local.tts_engine == "Windows voice" {
+    } else if local.managed {
         Speaking::Windows
     } else {
-        Speaking::External
+        let saved = local.extra.get(SPEAKING_KEY).and_then(Value::as_str);
+        if saved == Some("Piper") {
+            Speaking::Piper
+        } else if local.tts_engine != "Windows voice" {
+            Speaking::External
+        } else if saved == Some("Windows") {
+            Speaking::Windows
+        } else {
+            Speaking::Piper
+        }
     }
+}
+
+/// Stores the speaking choice. Piper and Windows both save `TtsEngine = "Windows voice"`; an
+/// external server is chosen by the caller setting `tts_engine`.
+pub fn set_speaking(local: &mut LocalVoiceOptions, speaking: Speaking) {
+    let name = match speaking {
+        Speaking::Piper => "Piper",
+        Speaking::Windows => "Windows",
+        _ => {
+            local.extra.remove(SPEAKING_KEY);
+            return;
+        }
+    };
+    local.tts_engine = "Windows voice".into();
+    local
+        .extra
+        .insert(SPEAKING_KEY.into(), Value::String(name.into()));
+}
+
+/// The built-in Piper voices that cover `language`, smallest first.
+pub fn piper_voices(language: &str) -> Vec<&'static TtsModel> {
+    let base = language.split(['-', '_']).next().unwrap_or("");
+    let mut voices: Vec<&TtsModel> = tts_models()
+        .iter()
+        .filter(|m| m.engine == "piper" && m.id != "windows" && m.package.is_none())
+        .filter(|m| m.supports(base))
+        .collect();
+    voices.sort_by_key(|m| m.bytes);
+    voices
+}
+
+/// The saved Piper voice if it speaks the setup language, else the smallest one that does.
+pub fn piper_voice(local: &LocalVoiceOptions) -> Option<&'static TtsModel> {
+    let voices = piper_voices(&local.speech_language);
+    let saved = local.extra.get(PIPER_VOICE_KEY).and_then(Value::as_str);
+    saved
+        .and_then(|id| voices.iter().copied().find(|m| m.id == id))
+        .or_else(|| voices.first().copied())
+}
+
+/// The saved Piper speed (1.0 is normal), kept inside 0.5 to 2.0.
+pub fn piper_speed(local: &LocalVoiceOptions) -> f64 {
+    let speed = local.extra.get(PIPER_SPEED_KEY).and_then(Value::as_f64);
+    speed
+        .filter(|s| s.is_finite())
+        .unwrap_or(1.0)
+        .clamp(0.5, 2.0)
+}
+
+/// Stores the Piper voice and speed.
+pub fn set_piper(local: &mut LocalVoiceOptions, voice: &str, speed: f64) {
+    local
+        .extra
+        .insert(PIPER_VOICE_KEY.into(), Value::String(voice.into()));
+    let speed = if speed.is_finite() {
+        speed.clamp(0.5, 2.0)
+    } else {
+        1.0
+    };
+    local
+        .extra
+        .insert(PIPER_SPEED_KEY.into(), Value::from(speed));
 }
 
 /// Picks the listening engine and speaking engine for the saved options.
@@ -293,7 +372,7 @@ mod tests {
             l.speech_language = code.into();
             let e = resolve(&l);
             assert_eq!(e.listening, Listening::Whistle, "{code}");
-            assert_eq!(e.speaking, Speaking::Windows);
+            assert_eq!(e.speaking, Speaking::Piper);
             assert_eq!(e.note, None);
         }
         assert_eq!(label(&local()), "Whistle · built in");
@@ -385,6 +464,50 @@ mod tests {
         assert!(json.contains("\"ListeningEngine\":\"Whistle\""));
         let back = Options::from_json(json.as_bytes()).unwrap();
         assert_eq!(chosen(&back.local_voice), Some(Listening::Whistle));
+    }
+
+    #[test]
+    fn piper_is_the_default_speaker_and_explicit_choices_win() {
+        let mut l = local();
+        assert_eq!(speaking(&l), Speaking::Piper);
+        set_speaking(&mut l, Speaking::Windows);
+        assert_eq!(speaking(&l), Speaking::Windows);
+        set_speaking(&mut l, Speaking::Piper);
+        assert_eq!(speaking(&l), Speaking::Piper);
+        l.tts_engine = "Kokoro".into();
+        set_speaking(&mut l, Speaking::External);
+        assert_eq!(speaking(&l), Speaking::External);
+        // A speech pack keeps its own voice, or the Windows one.
+        let mut l = local();
+        l.managed = true;
+        l.managed_tts = "windows".into();
+        assert_eq!(speaking(&l), Speaking::Windows);
+    }
+
+    #[test]
+    fn piper_voice_follows_the_language() {
+        let mut l = local();
+        l.speech_language = "es".into();
+        assert_eq!(piper_voice(&l).unwrap().id, "es_MX-ald-x_low");
+        set_piper(&mut l, "es_ES-carlfm-x_low", 1.25);
+        assert_eq!(piper_voice(&l).unwrap().id, "es_ES-carlfm-x_low");
+        l.speech_language = "en-GB".into();
+        assert_eq!(piper_voice(&l).unwrap().id, "en_US-amy-low");
+        l.speech_language = "id".into();
+        assert_eq!(piper_voice(&l).unwrap().id, "id_ID-news_tts-medium");
+        l.speech_language = "fr".into();
+        assert!(piper_voice(&l).is_none());
+        set_piper(&mut l, "x", 9.0);
+        assert_eq!(piper_speed(&l), 2.0);
+        set_piper(&mut l, "x", 0.1);
+        assert_eq!(piper_speed(&l), 0.5);
+        l.extra.remove(PIPER_SPEED_KEY);
+        assert_eq!(piper_speed(&l), 1.0);
+        set_piper(&mut l, "es_MX-ald-x_low", 1.5);
+        let json = serde_json::to_string(&l).unwrap();
+        assert!(json.contains("\"PiperVoice\":\"es_MX-ald-x_low\""));
+        let back: LocalVoiceOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(piper_speed(&back), 1.5);
     }
 
     #[test]

@@ -5,7 +5,8 @@
 //! is never loaded at startup. Downloads are pinned: the size is checked against the catalog, the
 //! SHA-256 is verified before anything is moved or extracted, archives are unpacked into a
 //! staging folder with path and link checks, and the folder is listed in `installed.txt` only
-//! after a complete extraction. Whistle is built in and never installed here.
+//! after a complete extraction. Whistle and the default Piper voice ship beside the app; Piper is
+//! unpacked from those files on first use, with no download.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -23,6 +24,7 @@ use naby_core::assistant::storage::{storage_size, SpeechStorage};
 use naby_ui::assistant::voice::{InstalledModel, SpeechPanel};
 use sha2::{Digest, Sha256};
 
+use super::whistle::{self, LockEntry};
 use crate::wake::Waker;
 
 pub const NATIVE_UNAVAILABLE: &str = "Built-in speech packs require a native Windows x64 process and CPU with AVX2/FMA. On ARM64, use Whistle, external local ASR/TTS services or Windows voice.";
@@ -357,6 +359,183 @@ pub fn download(
     })();
     let _ = fs::remove_file(&partial);
     result
+}
+
+/// Downloads Whistle's model and engine for `arch` from the lock `entries` into `folder`, each
+/// verified against its pinned size and SHA-256 before it appears there.
+pub fn install_whistle_files(
+    entries: &[LockEntry],
+    arch: &str,
+    folder: &Path,
+    cancel: &AtomicBool,
+    allow_http: bool,
+    progress: &mut dyn FnMut(&str, f64),
+) -> Result<(), Fail> {
+    // Resolve both files first so nothing is downloaded when one cannot be installed.
+    let mut wanted = Vec::new();
+    for name in [whistle::MODEL_FILE, whistle::ENGINE_FILE] {
+        let entry = entries
+            .iter()
+            .find(|e| e.name == name && (e.arch == arch || e.arch == "any"))
+            .ok_or_else(|| {
+                msg(format!(
+                    "Whistle is not available for this processor ({arch})."
+                ))
+            })?;
+        if !entry.pinned() {
+            return Err(msg("Whistle's checksums are not pinned in this build."));
+        }
+        wanted.push((name, entry));
+    }
+    for (name, entry) in wanted {
+        let asset = Asset {
+            url: entry.url.clone(),
+            bytes: entry.bytes,
+            sha256: entry.sha256.clone(),
+        };
+        download(
+            &asset,
+            &folder.join(name),
+            name,
+            cancel,
+            allow_http,
+            progress,
+        )?;
+    }
+    Ok(())
+}
+
+// ----- built-in Piper ------------------------------------------------------------------------------
+
+/// The Piper engine archive shipped beside the executable (the pinned zip itself).
+pub const PIPER_BUNDLE_ENGINE: &str = "piper_windows_amd64.zip";
+/// The voice shipped beside the executable.
+pub const BUNDLED_PIPER_VOICE: &str = "es_MX-ald-x_low";
+/// Every Piper file the setup ships, as listed in `piper.lock`.
+pub const PIPER_BUNDLE: [&str; 4] = [
+    PIPER_BUNDLE_ENGINE,
+    "es_MX-ald-x_low.onnx",
+    "es_MX-ald-x_low.onnx.json",
+    "es_MX-ald-x_low.onnx.MODEL_CARD",
+];
+
+/// The executable's folder, where the setup ships Whistle and Piper.
+pub fn bundle_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+}
+
+/// Piper and `voice` are unpacked and verified in the speech storage (x64 only).
+pub fn piper_ready(storage: &SpeechStorage, voice: &TtsModel) -> bool {
+    cfg!(target_arch = "x86_64")
+        && ready(&storage.piper_folder(), Some(&storage.piper_exe()))
+        && has_tts_weights(storage, voice)
+}
+
+/// `dir` holds the engine archive and all three files of `voice`.
+pub fn piper_bundled(dir: Option<&Path>, voice: &TtsModel) -> bool {
+    let Some(dir) = dir else { return false };
+    [
+        PIPER_BUNDLE_ENGINE.to_owned(),
+        format!("{}.onnx", voice.id),
+        format!("{}.onnx.json", voice.id),
+        format!("{}.onnx.MODEL_CARD", voice.id),
+    ]
+    .iter()
+    .all(|name| dir.join(name).is_file())
+}
+
+/// Copies a shipped file to where the installer expects it; `download` then verifies it by size
+/// and SHA-256 (and fetches it again if the copy is wrong).
+fn seed(bundle: Option<&Path>, name: &str, target: &Path) -> Result<(), Fail> {
+    let Some(from) = bundle.map(|b| b.join(name)).filter(|f| f.is_file()) else {
+        return Ok(());
+    };
+    if !target.exists() {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(from, target)?;
+    }
+    Ok(())
+}
+
+/// Installs the Piper engine and `voice` into the speech storage. Files shipped in `bundle` are
+/// copied and verified, so nothing is downloaded when the setup shipped them.
+pub fn install_piper_files(
+    storage: &SpeechStorage,
+    voice: &TtsModel,
+    bundle: Option<&Path>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(&str, f64),
+) -> Result<(), Fail> {
+    use naby_core::assistant::speech as sp;
+    if !cfg!(target_arch = "x86_64") {
+        return Err(msg(
+            "Piper runs on x64 Windows only; the Windows voice speaks on this PC.",
+        ));
+    }
+    if !ready(&storage.piper_folder(), Some(&storage.piper_exe())) {
+        // `install_package` names the archive after the folder: piper-2023.11.14-2.zip.
+        let archive = storage.downloads().join("piper-2023.11.14-2.zip");
+        seed(bundle, PIPER_BUNDLE_ENGINE, &archive)?;
+    }
+    install_package(
+        storage,
+        &sp::piper_engine(),
+        &storage.piper_folder(),
+        Some(&storage.piper_exe()),
+        "Piper speech engine",
+        cancel,
+        progress,
+    )?;
+    let onnx = storage.tts_path(voice);
+    let files = [
+        (".onnx", "", voice.bytes, &voice.hash, voice.name.as_str()),
+        (
+            ".onnx.json",
+            ".json",
+            0,
+            &voice.config_hash,
+            "Voice configuration",
+        ),
+        (
+            "MODEL_CARD",
+            ".MODEL_CARD",
+            0,
+            &voice.card_hash,
+            "Voice attribution and model card",
+        ),
+    ];
+    for (remote, local, bytes, hash, title) in files {
+        let target = PathBuf::from(format!("{}{local}", onnx.display()));
+        seed(bundle, &format!("{}.onnx{local}", voice.id), &target)?;
+        let asset = Asset {
+            url: sp::voice_url(voice, remote),
+            bytes,
+            sha256: hash.clone(),
+        };
+        download(&asset, &target, title, cancel, false, progress)?;
+    }
+    fs::write(storage.root().join("SOURCES.txt"), SOURCES)?;
+    Ok(())
+}
+
+/// The line the Models page and Voice setup show for the built-in Piper voice.
+pub fn piper_status_text(storage: &SpeechStorage, voice: &TtsModel) -> String {
+    if !cfg!(target_arch = "x86_64") {
+        "Piper runs on x64 Windows only; the Windows voice speaks on this PC.".into()
+    } else if piper_ready(storage, voice) {
+        "Ready \u{b7} runs on this PC only while Naby speaks.".into()
+    } else if piper_bundled(bundle_dir().as_deref(), voice) {
+        "Included with NabyScape \u{b7} prepared on first use, no download.".into()
+    } else {
+        format!(
+            "Not installed \u{b7} about {:.0} MB download.",
+            (voice.bytes + naby_core::assistant::speech::piper_engine().bytes) as f64 / 1e6
+        )
+    }
 }
 
 /// Unpacks a zip into `staging` with the same safety rules as the C# installer.
@@ -745,46 +924,7 @@ pub fn install_pack(
             progress,
         )?;
     } else if tts.id != "windows" {
-        install_package(
-            storage,
-            &s::piper_engine(),
-            &storage.piper_folder(),
-            Some(&storage.piper_exe()),
-            "Piper speech engine",
-            cancel,
-            progress,
-        )?;
-        let onnx = storage.tts_path(tts);
-        let sibling = |suffix: &str| PathBuf::from(format!("{}{suffix}", onnx.display()));
-        let asset = |suffix: &str, bytes: u64, hash: &str| Asset {
-            url: s::voice_url(tts, suffix),
-            bytes,
-            sha256: hash.to_owned(),
-        };
-        download(
-            &asset(".onnx", tts.bytes, &tts.hash),
-            &onnx,
-            &tts.name,
-            cancel,
-            false,
-            progress,
-        )?;
-        download(
-            &asset(".onnx.json", 0, &tts.config_hash),
-            &sibling(".json"),
-            "Voice configuration",
-            cancel,
-            false,
-            progress,
-        )?;
-        download(
-            &asset("MODEL_CARD", 0, &tts.card_hash),
-            &sibling(".MODEL_CARD"),
-            "Voice attribution and model card",
-            cancel,
-            false,
-            progress,
-        )?;
+        install_piper_files(storage, tts, bundle_dir().as_deref(), cancel, progress)?;
     }
     fs::write(storage.root().join("SOURCES.txt"), SOURCES)?;
     Ok(())
@@ -1150,6 +1290,110 @@ impl SpeechInstaller {
         }
     }
 
+    /// Where Settings installs Whistle (see `whistle::locate`).
+    pub fn whistle_dir(&self) -> PathBuf {
+        self.storage.root().join(whistle::INSTALL_FOLDER)
+    }
+
+    /// Downloads Whistle on a worker; progress shows on the Models page.
+    pub fn install_whistle(self: &Arc<Self>) {
+        let cancel = {
+            let mut s = self.state();
+            if s.installing || s.scanning || !self.storage.begin() {
+                return;
+            }
+            s.installing = true;
+            s.cancel = Arc::new(AtomicBool::new(false));
+            s.cancel.clone()
+        };
+        self.report("Preparing the Whistle download\u{2026}", 0.0);
+        let me = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("NabyScape Whistle install".into())
+            .spawn(move || {
+                let result = whistle::Lock::embedded()
+                    .map_err(|e| msg(e.message()))
+                    .and_then(|lock| {
+                        let mut progress = |text: &str, value: f64| me.report(text, value);
+                        install_whistle_files(
+                            lock.entries(),
+                            whistle::current_arch(),
+                            &me.whistle_dir(),
+                            &cancel,
+                            false,
+                            &mut progress,
+                        )
+                    });
+                me.storage.end();
+                me.state().installing = false;
+                match result {
+                    Ok(()) => me.report("Whistle installed and verified.", 100.0),
+                    Err(Fail::Cancelled) => me.report(
+                        "Whistle installation cancelled. Choose Install Whistle to retry.",
+                        0.0,
+                    ),
+                    Err(Fail::Message(m)) => {
+                        me.report(&format!("Whistle installation failed: {m}"), 0.0)
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.storage.end();
+            self.state().installing = false;
+        }
+    }
+
+    /// Installs Piper and `voice_id` on a worker (offline when the setup shipped the files).
+    pub fn install_piper(self: &Arc<Self>, voice_id: &str) {
+        let Ok(voice) = tts_by_id(voice_id) else {
+            self.report("Choose a Piper voice.", 0.0);
+            return;
+        };
+        let cancel = {
+            let mut s = self.state();
+            if s.installing || s.scanning || !self.storage.begin() {
+                return;
+            }
+            s.installing = true;
+            s.cancel = Arc::new(AtomicBool::new(false));
+            s.cancel.clone()
+        };
+        self.report("Preparing Piper\u{2026}", 0.0);
+        let me = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("NabyScape Piper install".into())
+            .spawn(move || {
+                let mut progress = |text: &str, value: f64| me.report(text, value);
+                let result =
+                    ensure_cpp_runtime(&me.storage, &cancel, &mut progress).and_then(|()| {
+                        let bundle = bundle_dir();
+                        install_piper_files(
+                            &me.storage,
+                            voice,
+                            bundle.as_deref(),
+                            &cancel,
+                            &mut progress,
+                        )
+                    });
+                me.storage.end();
+                me.state().installing = false;
+                match result {
+                    Ok(()) => me.report("Piper installed and verified.", 100.0),
+                    Err(Fail::Cancelled) => me.report(
+                        "Piper installation cancelled. Choose Install Piper to retry.",
+                        0.0,
+                    ),
+                    Err(Fail::Message(m)) => {
+                        me.report(&format!("Piper installation failed: {m}"), 0.0)
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.storage.end();
+            self.state().installing = false;
+        }
+    }
+
     /// Removes a model on a worker. `release` ends any voice session holding the files.
     pub fn remove(self: &Arc<Self>, id: &str, tts: bool, release: Arc<dyn Fn() + Send + Sync>) {
         if self.busy() {
@@ -1224,7 +1468,6 @@ impl SpeechInstaller {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
 
     use super::*;
@@ -1253,6 +1496,187 @@ mod tests {
             bytes: body.len() as u64,
             sha256: sha256_hex(body),
         }
+    }
+
+    fn whistle_entry(name: &str, arch: &str, body: &[u8]) -> LockEntry {
+        LockEntry {
+            name: name.into(),
+            arch: arch.into(),
+            url: serve(body.to_vec(), None),
+            bytes: body.len() as u64,
+            sha256: sha256_hex(body),
+        }
+    }
+
+    #[test]
+    #[ignore = "downloads about 18 MB from Hugging Face"]
+    fn whistle_installs_from_the_embedded_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = whistle::Lock::embedded().unwrap();
+        install_whistle_files(
+            lock.entries(),
+            whistle::current_arch(),
+            dir.path(),
+            &AtomicBool::new(false),
+            false,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            whistle::availability_in(dir.path(), &lock, whistle::current_arch(), false),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn piper_lock_matches_the_catalog() {
+        use naby_core::assistant::speech as sp;
+        let lock = whistle::Lock::parse(include_str!("../../../../piper.lock")).unwrap();
+        let names: Vec<&str> = lock.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, PIPER_BUNDLE);
+        assert!(lock.entries().iter().all(|e| e.arch == "x64" && e.pinned()));
+        let engine = sp::piper_engine();
+        let first = &lock.entries()[0];
+        assert_eq!(
+            (first.url.as_str(), first.bytes, first.sha256.as_str()),
+            (engine.url.as_str(), engine.bytes, engine.sha256.as_str())
+        );
+        let v = sp::tts_by_id(BUNDLED_PIPER_VOICE).unwrap();
+        let wanted = [
+            (".onnx", v.bytes, &v.hash),
+            (".onnx.json", 4877, &v.config_hash),
+            ("MODEL_CARD", 589, &v.card_hash),
+        ];
+        for (entry, (suffix, bytes, hash)) in lock.entries()[1..].iter().zip(wanted) {
+            assert_eq!(entry.url, sp::voice_url(v, suffix));
+            assert_eq!((entry.bytes, &entry.sha256), (bytes, hash));
+        }
+        for name in PIPER_BUNDLE {
+            assert!(crate::install::PAYLOAD_FILES.contains(&name), "{name}");
+        }
+    }
+
+    #[test]
+    fn piper_bundled_needs_all_four_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let voice = tts_by_id(BUNDLED_PIPER_VOICE).unwrap();
+        assert!(!piper_bundled(None, voice));
+        for name in PIPER_BUNDLE {
+            assert!(!piper_bundled(Some(dir.path()), voice));
+            fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        assert!(piper_bundled(Some(dir.path()), voice));
+        assert!(!piper_bundled(
+            Some(dir.path()),
+            tts_by_id("en_US-amy-low").unwrap()
+        ));
+    }
+
+    /// Reads the files from `NABY_PIPER_BUNDLE` when set (then nothing may be downloaded);
+    /// writes the spoken sample to `NABY_PIPER_WAV` when set.
+    #[test]
+    #[ignore = "downloads about 45 MB (or reads NABY_PIPER_BUNDLE) and runs the real piper.exe"]
+    #[cfg(windows)]
+    fn piper_installs_and_speaks_spanish() {
+        use super::super::dsp::wav_encode;
+        use super::super::local::{Job, PiperTts};
+        use super::super::pipeline::Speaker;
+        let dir = tempfile::tempdir().unwrap();
+        let storage = SpeechStorage::new(dir.path());
+        let voice = tts_by_id(BUNDLED_PIPER_VOICE).unwrap();
+        let bundle = std::env::var_os("NABY_PIPER_BUNDLE").map(PathBuf::from);
+        let mut seen = Vec::new();
+        install_piper_files(
+            &storage,
+            voice,
+            bundle.as_deref(),
+            &AtomicBool::new(false),
+            &mut |text, _| seen.push(text.to_owned()),
+        )
+        .unwrap();
+        assert!(piper_ready(&storage, voice));
+        if bundle.is_some() {
+            assert!(
+                !seen.iter().any(|t| t.starts_with("Downloading")),
+                "downloaded: {seen:?}"
+            );
+        }
+        let mut tts = PiperTts {
+            exe: storage.piper_exe(),
+            model: storage.tts_path(voice),
+            speaker: 0,
+            length_scale: 1.0,
+            job: Arc::new(Job::new().unwrap()),
+        };
+        let pcm = tts
+            .synthesize(
+                "Hola, soy Naby. \u{bf}En qu\u{e9} te puedo ayudar hoy?",
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        // The speaker returns 24 kHz mono 16-bit playback audio.
+        let seconds = pcm.len() as f64 / 2.0 / 24_000.0;
+        println!("spoke {seconds:.2} s ({} bytes of PCM)", pcm.len());
+        assert!(seconds > 0.5, "{seconds}");
+        if let Some(path) = std::env::var_os("NABY_PIPER_WAV") {
+            fs::write(path, wav_encode(24_000, &pcm)).unwrap();
+        }
+    }
+
+    #[test]
+    fn whistle_installs_the_model_and_this_arch_engine_verified() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("whistle");
+        let entries = [
+            whistle_entry("whistle.cact", "any", b"model"),
+            whistle_entry("needle.exe", "x64", b"engine x64"),
+        ];
+        install_whistle_files(
+            &entries,
+            "x64",
+            &folder,
+            &AtomicBool::new(false),
+            true,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(fs::read(folder.join("whistle.cact")).unwrap(), b"model");
+        assert_eq!(fs::read(folder.join("needle.exe")).unwrap(), b"engine x64");
+
+        // No engine for the arch, an unpinned entry, or a wrong hash: refused, nothing written.
+        let other = dir.path().join("other");
+        let missing = install_whistle_files(
+            &entries,
+            "arm64",
+            &other,
+            &AtomicBool::new(false),
+            true,
+            &mut |_, _| {},
+        );
+        assert!(matches!(missing, Err(Fail::Message(m)) if m.contains("arm64")));
+        let mut unpinned = whistle_entry("whistle.cact", "any", b"model");
+        unpinned.sha256 = whistle::UNPINNED.into();
+        let refused = install_whistle_files(
+            &[unpinned],
+            "x64",
+            &other,
+            &AtomicBool::new(false),
+            true,
+            &mut |_, _| {},
+        );
+        assert!(matches!(refused, Err(Fail::Message(m)) if m.contains("pinned")));
+        let mut wrong = whistle_entry("whistle.cact", "any", b"model");
+        wrong.sha256 = sha256_hex(b"different");
+        let bad = install_whistle_files(
+            &[wrong],
+            "x64",
+            &other,
+            &AtomicBool::new(false),
+            true,
+            &mut |_, _| {},
+        );
+        assert!(bad.is_err());
+        assert!(!other.join("whistle.cact").exists());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! `--install`: the per-user installer (C# `Installer.cs` + `InstallPaths.cs`).
 //!
 //! `nabyscape.exe` is its own setup. `NabyScape-<rid>-Setup.exe` is the same program with a ZIP
-//! archive appended after the PE image (`libneedle.dll`, `whistle.cact`, notices); the installer
+//! archive appended after the PE image (Whistle, the Piper engine and voice, notices); the installer
 //! copies the running executable byte for byte to the install folder (so the update helper's
 //! SHA-256 check of the installed copy still matches the downloaded setup) and extracts that
 //! payload next to it. Without an appended archive the files next to the executable are used.
@@ -38,9 +38,14 @@ pub const RETIRED_HOST_FILES: [&str; 5] = [
     "RUST-Library-COPYRIGHT.html",
 ];
 /// Files the setup carries next to the executable. Nothing else is ever extracted.
-pub const PAYLOAD_FILES: [&str; 5] = [
-    "libneedle.dll",
+pub const PAYLOAD_FILES: [&str; 10] = [
+    "needle.exe",
     "whistle.cact",
+    "piper_windows_amd64.zip",
+    "es_MX-ald-x_low.onnx",
+    "es_MX-ald-x_low.onnx.json",
+    "es_MX-ald-x_low.onnx.MODEL_CARD",
+    "PIPER-NOTICE.txt",
     "LICENSE",
     "THIRD-PARTY-NOTICES.txt",
     "WHISTLE-NOTICE.txt",
@@ -1014,8 +1019,10 @@ mod tests {
             "BillyNabilaIsland.exe",
             "Uninstall.ps1",
             "LICENSE",
-            "libneedle.dll",
+            "needle.exe",
             "whistle.cact",
+            "piper_windows_amd64.zip",
+            "PIPER-NOTICE.txt",
         ] {
             assert_eq!(files.iter().filter(|f| **f == name).count(), 1, "{name}");
         }
@@ -1086,7 +1093,7 @@ mod tests {
             &source,
             b"MZ-fake-exe",
             &[
-                ("libneedle.dll", b"dll-bytes"),
+                ("needle.exe", b"exe-bytes"),
                 ("whistle.cact", b"model"),
                 ("LICENSE", b"mit"),
             ],
@@ -1110,10 +1117,7 @@ mod tests {
             fs::read(&outcome.executable).unwrap(),
             fs::read(&source).unwrap()
         );
-        assert_eq!(
-            fs::read(target.join("libneedle.dll")).unwrap(),
-            b"dll-bytes"
-        );
+        assert_eq!(fs::read(target.join("needle.exe")).unwrap(), b"exe-bytes");
         assert_eq!(fs::read(target.join("whistle.cact")).unwrap(), b"model");
         assert_eq!(fs::read(target.join("LICENSE")).unwrap(), b"mit");
         assert!(!target.join("whistle.cact.new").exists());
@@ -1174,23 +1178,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("NabyScape.exe");
         fs::write(&source, b"MZ-plain").unwrap();
-        fs::write(dir.path().join("libneedle.dll"), b"sibling dll").unwrap();
+        fs::write(dir.path().join("needle.exe"), b"sibling exe").unwrap();
         fs::write(dir.path().join("unrelated.txt"), b"x").unwrap();
         let target = dir.path().join("out");
         fs::create_dir(&target).unwrap();
         let written = extract_payload(&source, &target).unwrap();
-        assert_eq!(written, ["libneedle.dll"]);
-        assert_eq!(
-            fs::read(target.join("libneedle.dll")).unwrap(),
-            b"sibling dll"
-        );
+        assert_eq!(written, ["needle.exe"]);
+        assert_eq!(fs::read(target.join("needle.exe")).unwrap(), b"sibling exe");
         assert!(!target.join("unrelated.txt").exists());
     }
 
     #[test]
     fn payload_rejects_unexpected_names_and_path_tricks() {
         let dir = tempfile::tempdir().unwrap();
-        for name in ["evil.dll", "../libneedle.dll", "sub/whistle.cact"] {
+        for name in ["evil.dll", "../needle.exe", "sub/whistle.cact"] {
             let source = dir.path().join("NabyScape-Setup.exe");
             setup_with_payload(&source, b"MZ", &[(name, b"x")]);
             let target = dir.path().join("out");

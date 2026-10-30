@@ -10,9 +10,13 @@
     NabyScape-Notices.zip           SHA256SUMS
 
   nabyscape.exe is its own installer. A Setup.exe is the program with a ZIP appended after the
-  PE image holding the Whistle files (libneedle.dll, whistle.cact) and the notices; installing
+  PE image holding the Whistle files (needle.exe, whistle.cact), the Piper engine and default
+  voice (x64 only; rust/piper.lock) and the notices; installing
   copies the exe byte for byte and unpacks that payload next to it. The Portable.zip holds the
   plain exe plus the same files.
+
+  Piper files come from rust/piper.lock (same format): the pinned piper_windows_amd64.zip and the
+  es_MX-ald-x_low voice. They are bundled unmodified; the app unpacks them on first use.
 
   Whistle files come from rust/whistle.lock (written by the voice task): a JSON array of
   { "name", "arch" ("any"|"x64"|"arm64"), "url", "sha256" }. Every download is verified
@@ -21,10 +25,9 @@
   Pinning: the lock is embedded in the executable (include_str!), and the program refuses Whistle
   while any hash says TO_BE_PINNED. With -PinWhistle (implied automatically when any entry is
   unpinned) the script first downloads every entry, computes its SHA-256 and rewrites the lock
-  file with the real hashes BEFORE cargo builds, then verifies the rewritten lock. If a libneedle
-  URL answers 404 the script lists the platform folder through the Hugging Face API
-  (https://huggingface.co/api/models/Cactus-Compute/needle3/tree/main/windows-x86_64) and takes
-  the .dll found there; it fails with a clear message when that is not exactly one file. Commit
+  file with the real hashes BEFORE cargo builds, then verifies the rewritten lock. (A 404 on a
+  .dll entry falls back to listing the Hugging Face folder; the lock now pins needle.exe, so that
+  path no longer applies.) Commit
   the pinned rust/whistle.lock afterwards so the released source matches the released binary.
 
 .EXAMPLE
@@ -34,6 +37,7 @@ param(
     [Parameter(Mandatory)][string]$Tag,
     [string]$OutputDirectory,
     [string]$LockFile = (Join-Path $PSScriptRoot 'whistle.lock'),
+    [string]$PiperLockFile = (Join-Path $PSScriptRoot 'piper.lock'),
     [string]$Cargo = 'cargo',
     [switch]$SkipTests,
     [switch]$SkipSelfTest,
@@ -54,6 +58,11 @@ if (-not (Test-Path -LiteralPath $LockFile)) {
 }
 $lock = @(Get-Content -LiteralPath $LockFile -Raw | ConvertFrom-Json)
 if ($lock.Count -eq 0) { throw "$LockFile lists no files." }
+if (-not (Test-Path -LiteralPath $PiperLockFile)) {
+    throw "Missing $PiperLockFile. The Piper engine and default voice are pinned there; the release cannot be built without it."
+}
+$piperLock = @(Get-Content -LiteralPath $PiperLockFile -Raw | ConvertFrom-Json)
+if ($piperLock.Count -eq 0) { throw "$PiperLockFile lists no files." }
 
 # --- pin the Whistle files (before anything is built: the lock is embedded in the exe) --------------
 function Get-FileSha256([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
@@ -123,10 +132,10 @@ if ($PinWhistle -or @($lock | Where-Object { Test-Unpinned $_ }).Count -gt 0) {
     if (@($lock | Where-Object { Test-Unpinned $_ }).Count -gt 0) { throw "$LockFile still has unpinned entries after pinning." }
     Write-Warning "rust/whistle.lock now holds real SHA-256 hashes. Commit it (git add rust/whistle.lock) so the source of this release matches the binary that embeds it."
 }
-foreach ($entry in $lock) {
-    if (-not $entry.name -or $entry.name -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid name in whistle.lock: $($entry.name)" }
-    if ($entry.arch -notin 'any', 'x64', 'arm64') { throw "Invalid arch for $($entry.name) in whistle.lock." }
-    if ($entry.sha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw "Invalid sha256 for $($entry.name) in whistle.lock." }
+foreach ($entry in @($lock) + @($piperLock)) {
+    if (-not $entry.name -or $entry.name -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid name in a lock file: $($entry.name)" }
+    if ($entry.arch -notin 'any', 'x64', 'arm64') { throw "Invalid arch for $($entry.name) in a lock file." }
+    if ($entry.sha256 -notmatch '^[A-Fa-f0-9]{64}$') { throw "Invalid sha256 for $($entry.name) in a lock file." }
     if ($entry.url -notmatch '^https://') { throw "Only https URLs are accepted ($($entry.name))." }
 }
 
@@ -146,7 +155,7 @@ function Get-Pinned($Entry) {
     }
     if ((Get-Sha256 $target) -ne $Entry.sha256.ToLowerInvariant()) {
         Remove-Item -LiteralPath $target -Force
-        throw "SHA-256 mismatch for $($Entry.name); the download does not match rust/whistle.lock."
+        throw "SHA-256 mismatch for $($Entry.name); the download does not match its lock file (rust/whistle.lock or rust/piper.lock)."
     }
     return $target
 }
@@ -197,7 +206,7 @@ try {
 Cactus Whistle speech recognition
 
 NabyScape ships the Cactus Compute Whistle speech-to-text model (whistle.cact, Hugging Face
-Cactus-Compute/whistle) and the Cactus Needle engine library (libneedle.dll, Hugging Face
+Cactus-Compute/whistle) and the Cactus Needle engine program (needle.exe, Hugging Face
 Cactus-Compute/needle3, engine 3.3.3) unmodified. The Needle engine is licensed under Apache-2.0
 (https://www.apache.org/licenses/LICENSE-2.0). Both are loaded only while voice input is active and
 run entirely on this PC; no audio leaves the device for the default listening model.
@@ -205,7 +214,23 @@ run entirely on this PC; no audio leaves the device for the default listening mo
 Whistle recognizes English, German, French, Spanish, Italian, Dutch and Polish (auto-detected).
 The exact files and SHA-256 hashes shipped are pinned in rust/whistle.lock of the source tree.
 '@ | Set-Content -LiteralPath (Join-Path $notices 'WHISTLE-NOTICE.txt') -Encoding utf8
-$noticeFiles = @('LICENSE', 'THIRD-PARTY-NOTICES.txt', 'WHISTLE-NOTICE.txt')
+@'
+Piper text-to-speech
+
+NabyScape ships the Piper speech engine (piper_windows_amd64.zip, release 2023.11.14-2,
+https://github.com/rhasspy/piper) and the voice es_MX-ald-x_low (rhasspy/piper-voices on Hugging
+Face; dataset under the Unlicense, see its MODEL_CARD) unmodified. Piper and piper-phonemize are
+MIT licensed; ONNX Runtime is MIT licensed.
+
+The engine archive includes eSpeak NG (GPL-3.0-or-later), shipped unmodified inside
+piper_windows_amd64.zip. Its source code is available from https://github.com/rhasspy/espeak-ng
+and https://github.com/espeak-ng/espeak-ng.
+
+The exact files and SHA-256 hashes shipped are pinned in rust/piper.lock of the source tree.
+Piper runs as a separate program only while Naby speaks a sentence; nothing stays in memory
+between sentences.
+'@ | Set-Content -LiteralPath (Join-Path $notices 'PIPER-NOTICE.txt') -Encoding utf8
+$noticeFiles = @('LICENSE', 'THIRD-PARTY-NOTICES.txt', 'WHISTLE-NOTICE.txt', 'PIPER-NOTICE.txt')
 
 # --- build per architecture ----------------------------------------------------------------------
 $targets = @(
@@ -231,15 +256,20 @@ try {
         New-Item -ItemType Directory -Path $stage | Out-Null
         Copy-Item -LiteralPath $exe -Destination (Join-Path $stage 'NabyScape.exe')
         $payload = @()
-        foreach ($entry in $lock | Where-Object { $_.arch -in 'any', $t.Arch }) {
+        foreach ($entry in (@($lock) + @($piperLock)) | Where-Object { $_.arch -in 'any', $t.Arch }) {
             $file = Get-Pinned $entry
             Copy-Item -LiteralPath $file -Destination (Join-Path $stage $entry.name)
             $payload += $entry.name
         }
-        foreach ($required in 'libneedle.dll', 'whistle.cact') {
+        foreach ($required in 'needle.exe', 'whistle.cact') {
             if ($payload -notcontains $required) { throw "whistle.lock has no $required for $($t.Arch)." }
         }
-        if (Test-Path -LiteralPath (Join-Path $stage 'libneedle.dll')) { Assert-PeMachine (Join-Path $stage 'libneedle.dll') $t.Machine }
+        if ($t.Arch -eq 'x64') {
+            foreach ($entry in $piperLock) {
+                if ($payload -notcontains $entry.name) { throw "piper.lock has no $($entry.name) for x64." }
+            }
+        }
+        if (Test-Path -LiteralPath (Join-Path $stage 'needle.exe')) { Assert-PeMachine (Join-Path $stage 'needle.exe') $t.Machine }
         foreach ($n in $noticeFiles) { Copy-Item -LiteralPath (Join-Path $notices $n) -Destination (Join-Path $stage $n) }
 
         # Self-test where this host can run the binary: payload present, store, fonts, version.

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "piper_windows_amd64.zip",
+    "arch": "x64",
+    "url": "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip",
+    "bytes": 22477236,
+    "sha256": "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea"
+  },
+  {
+    "name": "es_MX-ald-x_low.onnx",
+    "arch": "x64",
+    "url": "https://huggingface.co/rhasspy/piper-voices/resolve/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/es/es_MX/ald/x_low/es_MX-ald-x_low.onnx",
+    "bytes": 20986952,
+    "sha256": "d8aae54aee9eafb37fb85d6da676facafca31c2d84d11acdca1a5b6dd82b1df6"
+  },
+  {
+    "name": "es_MX-ald-x_low.onnx.json",
+    "arch": "x64",
+    "url": "https://huggingface.co/rhasspy/piper-voices/resolve/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/es/es_MX/ald/x_low/es_MX-ald-x_low.onnx.json",
+    "bytes": 4877,
+    "sha256": "5b372adf1f8c8d8f0610b9057fc2df001ad3f5f42cd9d6f853a78bef3f8b0644"
+  },
+  {
+    "name": "es_MX-ald-x_low.onnx.MODEL_CARD",
+    "arch": "x64",
+    "url": "https://huggingface.co/rhasspy/piper-voices/resolve/5041a7a49ae5b3a0f30e6837769eb03fdbb231bd/es/es_MX/ald/x_low/MODEL_CARD",
+    "bytes": 589,
+    "sha256": "75de85e71247db75274624efd6d816babf37cfd34358abed402b0e979f4aa5b9"
+  }
+]

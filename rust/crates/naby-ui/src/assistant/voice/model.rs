@@ -172,6 +172,16 @@ pub trait VoiceHost: Send + Sync {
     fn audio_check(&self) -> AudioCheck;
     /// Short Whistle status for the Models page ("Ready · built in" or the reason).
     fn whistle_status(&self) -> String;
+    /// Whether Whistle's files are in place (the Models page offers Install otherwise).
+    fn whistle_ready(&self) -> bool;
+    /// Download and verify Whistle; progress is reported through [`SpeechPanel`].
+    fn install_whistle(&self);
+    /// Short status of the built-in Piper voice `voice` ("Ready", "Not installed", ...).
+    fn piper_status(&self, voice: &str) -> String;
+    /// Whether Piper and `voice` are unpacked and verified.
+    fn piper_ready(&self, voice: &str) -> bool;
+    /// Install Piper and `voice` (offline when bundled); progress is reported through [`SpeechPanel`].
+    fn install_piper(&self, voice: &str);
 }
 
 /// A host with no audio at all (the voice room still draws, Start explains).
@@ -217,4 +227,15 @@ impl VoiceHost for NoVoice {
     fn whistle_status(&self) -> String {
         "Unavailable".into()
     }
+    fn whistle_ready(&self) -> bool {
+        false
+    }
+    fn install_whistle(&self) {}
+    fn piper_status(&self, _: &str) -> String {
+        "Unavailable".into()
+    }
+    fn piper_ready(&self, _: &str) -> bool {
+        false
+    }
+    fn install_piper(&self, _: &str) {}
 }

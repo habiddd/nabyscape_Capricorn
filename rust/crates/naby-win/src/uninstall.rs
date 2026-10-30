@@ -912,7 +912,7 @@ mod tests {
         let folder = dir.path().join("NabyScape");
         for name in [
             "NabyScape.exe",
-            "libneedle.dll",
+            "needle.exe",
             "whistle.cact",
             "LICENSE",
             "Uninstall.ps1",

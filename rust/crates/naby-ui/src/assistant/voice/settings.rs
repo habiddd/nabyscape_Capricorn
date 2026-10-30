@@ -16,7 +16,7 @@ use naby_core::assistant::voice::{save_wake_word, wake_threshold};
 use naby_core::command::Command;
 use naby_render::{TextEditOpts, Ui, Weight};
 
-use super::engine::{self, Listening};
+use super::engine::{self, Listening, Speaking};
 use super::model::{AudioCheckKind, VoiceHost};
 use super::room::mic_test_line;
 use crate::assistant::providers::{field, pill};
@@ -65,7 +65,13 @@ const SPEECH_LANGUAGES: [&str; 16] = [
     "en", "de", "fr", "es", "it", "nl", "pl", "id", "pt", "ja", "ko", "ru", "ar", "tr", "hi", "vi",
 ];
 const ASR_PROTOCOLS: [&str; 2] = ["WhisperCpp", "OpenAI-compatible"];
-const TTS_ENGINES: [&str; 3] = ["Windows voice", "Kokoro", "Piper"];
+/// `(label, saved TtsEngine)`: the first two are on this PC, the last two are servers.
+const SPEAKERS: [(&str, &str); 4] = [
+    ("Piper \u{b7} built in", "Windows voice"),
+    ("Windows voice", "Windows voice"),
+    ("Kokoro server", "Kokoro"),
+    ("Piper server", "Piper"),
+];
 const PREFERENCES: [&str; 3] = ["Light", "Balanced", "Quality"];
 
 /// Draft of the setup page (edited fields are applied by Save).
@@ -76,7 +82,9 @@ struct SetupDraft {
     local: LocalVoiceOptions,
     language: usize,
     asr_protocol: usize,
-    tts_engine: usize,
+    speaker: usize,
+    piper_voice: String,
+    piper_speed: f32,
     own_asr_engine: usize,
     own_tts_engine: usize,
     sensitivity: f32,
@@ -217,10 +225,20 @@ impl VoiceSettingsView {
                 .iter()
                 .position(|p| *p == local.asr_protocol)
                 .unwrap_or(0),
-            tts_engine: TTS_ENGINES
-                .iter()
-                .position(|p| *p == local.tts_engine)
-                .unwrap_or(0),
+            speaker: match engine::speaking(&LocalVoiceOptions {
+                enabled: true,
+                ..local.clone()
+            }) {
+                Speaking::Piper => 0,
+                Speaking::External => SPEAKERS
+                    .iter()
+                    .skip(2)
+                    .position(|(_, e)| *e == local.tts_engine)
+                    .map_or(1, |i| i + 2),
+                _ => 1,
+            },
+            piper_voice: engine::piper_voice(&local).map_or_else(String::new, |m| m.id.clone()),
+            piper_speed: engine::piper_speed(&local) as f32,
             own_asr_engine: OWN_ASR_ENGINES
                 .iter()
                 .position(|p| *p == local.own_asr_engine)
@@ -334,21 +352,73 @@ impl VoiceSettingsView {
 
     fn speaking_fields(&mut self, ui: &mut Ui<'_>) {
         ui.section_label("Speaking");
-        let mut pick = self.setup.tts_engine;
-        if ui.combo(&mut pick, &TTS_ENGINES).changed {
-            self.setup.tts_engine = pick;
+        let labels: Vec<&str> = SPEAKERS.iter().map(|(l, _)| *l).collect();
+        let mut pick = self.setup.speaker;
+        if ui.combo(&mut pick, &labels).changed {
+            self.setup.speaker = pick;
         }
-        if self.setup.tts_engine == 0 {
-            ui.label_dim("Uses your default installed Windows voice. No TTS server is needed. Voice and language availability depends on Windows.");
-        } else {
-            field(
-                ui,
-                "Text-to-speech address (localhost)",
-                &mut self.setup.local.tts_url,
-                200,
-            );
-            field(ui, "TTS model", &mut self.setup.local.tts_model, 160);
-            field(ui, "Voice", &mut self.setup.local.voice, 160);
+        match self.setup.speaker {
+            0 => self.piper_fields(ui),
+            1 => {
+                ui.label_dim("Uses your default installed Windows voice. No TTS server is needed. Voice and language availability depends on Windows.");
+            }
+            _ => {
+                field(
+                    ui,
+                    "Text-to-speech address (localhost)",
+                    &mut self.setup.local.tts_url,
+                    200,
+                );
+                field(ui, "TTS model", &mut self.setup.local.tts_model, 160);
+                field(ui, "Voice", &mut self.setup.local.voice, 160);
+            }
+        }
+    }
+
+    /// The built-in Piper voice and speed for the language chosen above.
+    fn piper_fields(&mut self, ui: &mut Ui<'_>) {
+        let code = SPEECH_LANGUAGES[self.setup.language.min(SPEECH_LANGUAGES.len() - 1)];
+        let voices = engine::piper_voices(code);
+        if voices.is_empty() {
+            ui.label_dim(&format!(
+                "No built-in Piper voice for {} yet; the Windows voice speaks.",
+                engine::language_label(code)
+            ));
+            return;
+        }
+        ui.label_dim("Piper runs on this PC and uses memory only while Naby speaks a sentence.");
+        let labels: Vec<String> = voices
+            .iter()
+            .map(|m| format!("{} \u{b7} {:.0} MB", m.name, m.bytes as f64 / 1e6))
+            .collect();
+        let names: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let mut pick = voices
+            .iter()
+            .position(|m| m.id == self.setup.piper_voice)
+            .unwrap_or(0);
+        if ui.combo(&mut pick, &names).changed || self.setup.piper_voice.is_empty() {
+            self.setup.piper_voice = voices[pick].id.clone();
+        }
+        ui.section_label("Speech speed");
+        ui.slider(&mut self.setup.piper_speed, 0.5..=2.0, 0.05);
+        ui.label_dim(&format!("{:.2}x", self.setup.piper_speed));
+        let id = voices[pick].id.clone();
+        self.piper_install(ui, &id);
+    }
+
+    /// Piper's status line and, when files are missing, the Install button with its progress.
+    fn piper_install(&mut self, ui: &mut Ui<'_>, voice: &str) {
+        let panel = self.host.speech();
+        ui.label_dim(&self.host.piper_status(voice));
+        if !self.host.piper_ready(voice)
+            && ui
+                .enabled(!panel.busy, |ui| ui.button("Install Piper"))
+                .clicked
+        {
+            self.host.install_piper(voice);
+        }
+        if panel.busy {
+            ui.progress_h((panel.progress / 100.0).clamp(0.0, 1.0) as f32, 6.0);
         }
     }
 
@@ -431,7 +501,7 @@ impl VoiceSettingsView {
         local.speech_language =
             SPEECH_LANGUAGES[self.setup.language.min(SPEECH_LANGUAGES.len() - 1)].into();
         local.asr_protocol = ASR_PROTOCOLS[self.setup.asr_protocol.min(1)].into();
-        local.tts_engine = TTS_ENGINES[self.setup.tts_engine.min(2)].into();
+        local.tts_engine = SPEAKERS[self.setup.speaker.min(3)].1.into();
         local.own_asr_engine = OWN_ASR_ENGINES[self.setup.own_asr_engine.min(3)].into();
         local.own_tts_engine = OWN_TTS_ENGINES[self.setup.own_tts_engine.min(5)].into();
         local.sensitivity = f64::from(self.setup.sensitivity).clamp(0.003, 0.15);
@@ -460,6 +530,8 @@ impl VoiceSettingsView {
             }
             _ => {}
         }
+        let speaker = self.setup.speaker;
+        let (piper_voice, piper_speed) = (self.setup.piper_voice.clone(), self.setup.piper_speed);
         self.service.edit_options(|options| {
             let mut next = engine::apply_choice(options, selected);
             let target = &mut next.local_voice;
@@ -472,6 +544,15 @@ impl VoiceSettingsView {
                 target.tts_url = local.tts_url.clone();
                 target.tts_model = local.tts_model.clone();
                 target.voice = local.voice.clone();
+                let speaking = match speaker {
+                    0 => Speaking::Piper,
+                    1 => Speaking::Windows,
+                    _ => Speaking::External,
+                };
+                engine::set_speaking(target, speaking);
+                if speaking == Speaking::Piper && !piper_voice.is_empty() {
+                    engine::set_piper(target, &piper_voice, f64::from(piper_speed));
+                }
             }
             if selected == Listening::External {
                 target.asr_protocol = local.asr_protocol.clone();
@@ -493,6 +574,14 @@ impl VoiceSettingsView {
             self.host.end();
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_piper_choice(&mut self, voice: &str, speed: f32) {
+        self.seed_setup();
+        self.setup.speaker = 0;
+        self.setup.piper_voice = voice.into();
+        self.setup.piper_speed = speed;
     }
 
     // ---- wake word ------------------------------------------------------------------------
@@ -632,14 +721,40 @@ impl VoiceSettingsView {
         ui.heading_sized("Models on this PC", 20.0);
         ui.label_dim("See what is installed and remove models you no longer use. Models load only while a conversation is active.");
 
-        // Whistle: built in, nothing to install or remove.
-        ui.section_label("Built in");
-        ui.label("Whistle \u{b7} built in");
+        // Whistle: shipped with the setup, or installed here when missing.
+        ui.section_label("Default listening model");
+        ui.label("Whistle");
         ui.label_dim(&format!(
-            "Listening for {}. Language is detected automatically. About 17 MB, shipped with NabyScape and checked against a pinned checksum before it loads.",
+            "Listening for {}. Language is detected automatically. About 18 MB from Cactus Compute, checked against a pinned checksum before it runs.",
             engine::whistle_language_names()
         ));
         ui.label_dim(&self.host.whistle_status());
+        if !self.host.whistle_ready()
+            && ui
+                .enabled(!panel.busy, |ui| ui.button("Install Whistle"))
+                .clicked
+        {
+            self.host.install_whistle();
+        }
+
+        // Piper: the default speaking voice, shipped beside the app.
+        ui.section_label("Default speaking voice");
+        ui.label("Piper");
+        match engine::piper_voice(&options.local_voice) {
+            Some(voice) => {
+                ui.label_dim(&format!(
+                    "{}. Runs on this PC and uses memory only while Naby speaks a sentence.",
+                    voice.name
+                ));
+                let id = voice.id.clone();
+                self.piper_install(ui, &id);
+            }
+            None => {
+                ui.label_dim(
+                    "No built-in Piper voice for this language; the Windows voice speaks.",
+                );
+            }
+        }
 
         ui.section_label("Speech packs");
         ui.label_dim("Packs add listening and speaking models for other languages or higher accuracy. Downloads are verified and stay on this PC.");

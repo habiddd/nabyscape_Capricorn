@@ -24,6 +24,13 @@ base64 = "0.22"
 url = "2"
 tempfile = "3"
 
+# `as_chunks` (this lint's fix) needs Rust 1.88, above the 1.85 MSRV; older clippy lacks the lint.
+[workspace.lints.rust]
+unknown_lints = "allow"
+
+[workspace.lints.clippy]
+chunks_exact_to_as_chunks = "allow"
+
 [profile.release]
 opt-level = 3
 lto = "fat"
