@@ -1,8 +1,6 @@
 //! Cross-fades between two values (`SwapText` 220 ms, `SwapArtwork` 320 ms), and the page
 //! presence heuristic.
 
-use std::cell::Cell;
-
 /// Holds the current value and, while a swap is running, the outgoing one.
 #[derive(Debug, Clone)]
 pub struct Crossfade<T: Clone + PartialEq> {
@@ -73,46 +71,6 @@ impl<T: Clone + PartialEq> Crossfade<T> {
     }
 }
 
-/// Knows whether a page was drawn recently. The overlay keeps every visited page alive and asks
-/// all of them for `next_frame` and `demand`; a page that is no longer shown must go quiet.
-#[derive(Debug, Default)]
-pub struct Presence {
-    seen: Cell<f64>,
-    clock: Cell<f64>,
-    shown: Cell<bool>,
-}
-
-/// A page that has not been drawn for this long is treated as hidden.
-const STALE: f64 = 3.5;
-
-impl Presence {
-    pub fn new() -> Self {
-        Presence::default()
-    }
-
-    /// Called from `frame` / `peek` with the host clock.
-    pub fn mark(&self, now: f64) {
-        self.seen.set(now);
-        self.clock.set(now);
-        self.shown.set(true);
-    }
-
-    /// Called from `next_frame` with the host clock.
-    pub fn observe(&self, now: f64) {
-        if now > self.clock.get() {
-            self.clock.set(now);
-        }
-    }
-
-    pub fn active(&self) -> bool {
-        self.shown.get() && self.clock.get() - self.seen.get() < STALE
-    }
-
-    pub fn hide(&self) {
-        self.shown.set(false);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,21 +91,5 @@ mod tests {
         // Without motion the swap is instant.
         assert!(f.set("c".into(), 2.0, false));
         assert!(f.outgoing(2.0).is_none());
-    }
-
-    #[test]
-    fn presence_goes_stale_when_frames_stop() {
-        let p = Presence::new();
-        assert!(!p.active());
-        p.mark(10.0);
-        assert!(p.active());
-        p.observe(12.0);
-        assert!(p.active());
-        p.observe(14.0);
-        assert!(!p.active());
-        p.mark(14.5);
-        assert!(p.active());
-        p.hide();
-        assert!(!p.active());
     }
 }

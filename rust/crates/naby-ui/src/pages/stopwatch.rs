@@ -1,7 +1,7 @@
 //! The `stopwatch` page (`StopwatchView` in `Features/Activities/StopwatchState.cs`): heading,
 //! tabular digits, a Start / Pause / Resume button and Reset.
 
-use super::common::{Ctl, Interaction, Presence};
+use super::common::{Ctl, Interaction};
 use super::{Page, PageCtx};
 use naby_core::command::Command;
 use naby_core::session::{Clock, Stopwatch};
@@ -73,7 +73,6 @@ pub(super) fn layout(c: &mut Ctl, rect: Rect, digits: &str, label: &str) -> f32 
 #[derive(Default)]
 struct StopwatchPage {
     ui: Interaction,
-    presence: Presence,
     secs: Option<u64>,
     text: String,
     running: bool,
@@ -117,18 +116,13 @@ impl Page for StopwatchPage {
         input: &InputState,
         out: &mut Vec<Command>,
     ) -> bool {
-        self.presence.mark(ctx.snaps.now);
         let label = self.refresh(ctx);
         let mut c = Ctl::draw(canvas, ctx, input, out, &mut self.ui);
         layout(&mut c, rect, &self.text, label);
         false
     }
 
-    fn next_frame(&self, now: f64) -> Option<f64> {
-        self.presence.observe(now);
-        if !self.presence.active() {
-            return None;
-        }
+    fn next_frame(&self, _now: f64) -> Option<f64> {
         self.next
     }
 
@@ -137,7 +131,6 @@ impl Page for StopwatchPage {
     }
 
     fn on_hide(&mut self) {
-        self.presence.hide();
         self.ui.reset();
         self.secs = None;
         self.next = None;
@@ -172,14 +165,9 @@ mod tests {
         let mut session = SessionState::default();
         session.stopwatch.toggle(Clock::system());
         h.snaps.session.replace(session);
-        assert_eq!(h.page.next_frame(h.snaps.now), None, "not drawn yet");
         h.idle();
         let at = h.page.next_frame(h.snaps.now).expect("ticks while running");
         assert!(at > h.snaps.now && at <= h.snaps.now + 1.1);
-        // Not drawn for a while: the page goes quiet.
-        assert_eq!(h.page.next_frame(h.snaps.now + 10.0), None);
-        h.page.on_hide();
-        assert_eq!(h.page.next_frame(h.snaps.now), None);
     }
 
     #[test]

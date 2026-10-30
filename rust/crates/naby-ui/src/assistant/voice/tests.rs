@@ -823,3 +823,67 @@ fn realtime_lines_are_recorded_for_the_chat_tab() {
         .realtime_instructions()
         .contains("does not provide computer-control tools"));
 }
+
+// ----- the Settings AI page --------------------------------------------------------------------
+
+#[test]
+fn the_settings_ai_page_embeds_providers_and_the_voice_pages() {
+    use crate::assistant::setup::SetupTab;
+    use crate::settings::{AiContext, AiSettingsPage, AiTarget, AssistantAiPage, HostInfo};
+    let Some(mut rig) = Rig::new(VoiceSnapshot::default()) else {
+        return;
+    };
+    let mut page = AssistantAiPage::new(rig.f.service.clone(), rig.host.clone());
+    let settings = presets::recommended();
+    let host = HostInfo::default();
+    let mut commands = Vec::new();
+    let draw = |rig: &mut Rig, page: &mut AssistantAiPage, commands: &mut Vec<_>| {
+        rig.now += 0.016;
+        let mut input = InputState::default();
+        input.time = rig.now;
+        rig.clear();
+        let area = rig.area();
+        let cx = AiContext {
+            lang: "en",
+            settings: &settings,
+            host: &host,
+            now: rig.now,
+        };
+        let mut ui = Ui::new(
+            &mut rig.canvas,
+            &rig.fonts,
+            &rig.theme,
+            &input,
+            &mut rig.mem,
+            area,
+        );
+        ui.scroll_area("ai", |ui| page.frame(ui, &cx, commands));
+    };
+    // Voice requests land on the real voice pages (Voice setup / Check audio).
+    page.open(AiTarget::Voice);
+    assert_eq!(page.setup().tab(), SetupTab::Voice);
+    assert_eq!(page.setup().voice_view().unwrap().page(), VoicePage::Setup);
+    draw(&mut rig, &mut page, &mut commands);
+    save("settings-ai-voice", &rig.canvas);
+    assert!(rig.ink() > 3000);
+    page.open(AiTarget::VoiceChecks);
+    assert_eq!(page.setup().voice_view().unwrap().page(), VoicePage::Audio);
+    draw(&mut rig, &mut page, &mut commands);
+    // Chat shows the provider connection editor.
+    page.open(AiTarget::Chat);
+    assert_eq!(page.setup().tab(), SetupTab::Chat);
+    draw(&mut rig, &mut page, &mut commands);
+    save("settings-ai-chat", &rig.canvas);
+    assert!(!page.has_unsaved_changes());
+    assert!(!page.dirty(), "nothing published since the last frame");
+    // A worker publishing (an options change) asks for a repaint.
+    rig.f
+        .service
+        .edit_options(|o| {
+            o.enabled = !o.enabled;
+            Ok(())
+        })
+        .unwrap();
+    assert!(page.dirty());
+    page.on_close();
+}

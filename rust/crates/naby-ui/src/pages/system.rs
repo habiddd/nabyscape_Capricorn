@@ -2,7 +2,7 @@
 //! (CPU with a 30 point history, memory, GPU, uptime), hardware, network, storage and
 //! processes. It asks the host to sample only while it is shown and tells it which tab is open.
 
-use super::common::{Ctl, Interaction, Presence};
+use super::common::{Ctl, Interaction};
 use super::{Page, PageCtx};
 use crate::host::{Demand, SystemInfo};
 use naby_core::color::Rgba;
@@ -65,7 +65,6 @@ enum Item {
 #[derive(Default)]
 struct SystemPage {
     ui: Interaction,
-    presence: Presence,
     tab: String,
     details_open: bool,
     items: Vec<Item>,
@@ -576,7 +575,6 @@ impl Page for SystemPage {
         input: &InputState,
         out: &mut Vec<Command>,
     ) -> bool {
-        self.presence.mark(ctx.snaps.now);
         self.refresh(ctx);
         let mut c = Ctl::draw(canvas, ctx, input, out, &mut self.ui);
         Self::layout(
@@ -592,13 +590,12 @@ impl Page for SystemPage {
 
     fn demand(&self) -> Demand {
         Demand {
-            system: self.presence.active(),
+            system: true,
             ..Demand::default()
         }
     }
 
-    fn next_frame(&self, now: f64) -> Option<f64> {
-        self.presence.observe(now);
+    fn next_frame(&self, _now: f64) -> Option<f64> {
         None
     }
 
@@ -607,7 +604,6 @@ impl Page for SystemPage {
     }
 
     fn on_hide(&mut self) {
-        self.presence.hide();
         self.ui.reset();
         self.items = Vec::new();
         self.key = None;
@@ -717,15 +713,8 @@ mod tests {
         let Some(mut h) = Harness::new("system") else {
             return;
         };
-        assert!(!h.page.demand().system, "not drawn yet");
         h.idle();
         assert!(h.page.demand().system);
-        h.page.next_frame(h.snaps.now + 20.0);
-        assert!(!h.page.demand().system, "an unseen page stops sampling");
-        h.idle();
-        assert!(h.page.demand().system);
-        h.page.on_hide();
-        assert!(!h.page.demand().system);
     }
 
     #[test]

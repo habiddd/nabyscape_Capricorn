@@ -1559,20 +1559,15 @@ mod os {
             Some(self.snaps.clone())
         }
 
-        fn run_command(&mut self, command: Command) -> bool {
-            self.out.push(command);
-            let changed = self.execute_pending();
-            self.reconcile_demand();
-            changed
-        }
-
         fn take_actions(&mut self) -> Vec<ShellAction> {
             std::mem::take(&mut self.actions)
         }
 
         fn run_commands(&mut self, commands: Vec<Command>) -> bool {
             self.out.extend(commands);
-            self.execute_pending()
+            let changed = self.execute_pending();
+            self.reconcile_demand();
+            changed
         }
 
         fn set_assistant_summary(&mut self, summary: AssistantSummary) -> bool {

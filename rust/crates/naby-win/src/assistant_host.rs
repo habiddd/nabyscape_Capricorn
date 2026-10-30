@@ -78,6 +78,62 @@ pub fn reflow(rect: RectI, work: RectI, scale: f32) -> RectI {
     RectI::new(left, top, left + width, top + height)
 }
 
+/// A pixel rectangle of the window's frame buffer (the orb's dirty rectangle), clipped to the
+/// buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirtyRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl DirtyRect {
+    /// Whole pixels covering `r`, kept inside a `width` x `height` buffer.
+    pub fn of(r: naby_render::Rect, width: u32, height: u32) -> DirtyRect {
+        let x0 = (r.x.floor().max(0.0) as u32).min(width);
+        let y0 = (r.y.floor().max(0.0) as u32).min(height);
+        let x1 = (r.right().ceil().max(0.0) as u32).min(width);
+        let y1 = (r.bottom().ceil().max(0.0) as u32).min(height);
+        DirtyRect {
+            x: x0,
+            y: y0,
+            w: x1.saturating_sub(x0),
+            h: y1.saturating_sub(y0),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.w == 0 || self.h == 0
+    }
+}
+
+/// Converts only `rect` of an RGBA canvas (`width` pixels per row) into the BGRA frame buffer.
+pub fn rgba_to_bgra_rect(src: &[u8], dst: &mut [u32], width: u32, rect: DirtyRect) {
+    for row in rect.y..rect.y + rect.h {
+        let start = (row * width + rect.x) as usize;
+        let end = start + rect.w as usize;
+        if end > dst.len() || end * 4 > src.len() {
+            return;
+        }
+        crate::window::rgba_to_bgra(&src[start * 4..end * 4], &mut dst[start..end]);
+    }
+}
+
+/// The rows of `rect` from a `width`-wide frame buffer as one contiguous block.
+pub fn copy_rows(pixels: &[u32], width: u32, rect: DirtyRect) -> Vec<u32> {
+    let mut out = Vec::with_capacity((rect.w * rect.h) as usize);
+    for row in rect.y..rect.y + rect.h {
+        let start = (row * width + rect.x) as usize;
+        let end = start + rect.w as usize;
+        if end > pixels.len() {
+            break;
+        }
+        out.extend_from_slice(&pixels[start..end]);
+    }
+    out
+}
+
 /// Delay in whole milliseconds until `at` (a host clock time in seconds), never zero.
 pub fn timer_millis(at: f64, now: f64) -> u32 {
     ((at - now) * 1000.0).ceil().clamp(1.0, 86_400_000.0) as u32
@@ -166,6 +222,7 @@ pub use os::{AssistantHost, HostKeys};
 #[cfg(windows)]
 mod os {
     use super::*;
+    use super::{copy_rows, rgba_to_bgra_rect, DirtyRect};
     use crate::capture::{self, CaptureTarget, TargetKind};
     use crate::clipboard::{read_paste, set_image_png, PasteContent};
     use crate::credentials::{AssistantKeys, SecretStore};
@@ -441,21 +498,40 @@ mod os {
                 visible: true,
                 active: self.active.get(),
             };
-            let mut out = WindowOut::default();
-            view.frame(canvas, fonts, &input, &env, &mut out);
-            {
-                let mut frame = self.frame.borrow_mut();
-                frame.width = width;
-                frame.height = height;
-                frame.pixels.resize((width * height) as usize, 0);
-                rgba_to_bgra(canvas.data(), &mut frame.pixels);
+            // While only the orb animates, repaint and present just its rectangle.
+            let same_size = {
+                let frame = self.frame.borrow();
+                frame.width == width && frame.height == height
+            };
+            let partial = if same_size {
+                view.frame_orb_only(canvas, &input, &env)
+            } else {
+                None
+            };
+            if let Some(dirty) = partial {
+                let rect = DirtyRect::of(dirty, width, height);
+                {
+                    let mut frame = self.frame.borrow_mut();
+                    rgba_to_bgra_rect(canvas.data(), &mut frame.pixels, width, rect);
+                }
+                self.blit_rect(hwnd, rect);
+            } else {
+                let mut out = WindowOut::default();
+                view.frame(canvas, fonts, &input, &env, &mut out);
+                {
+                    let mut frame = self.frame.borrow_mut();
+                    frame.width = width;
+                    frame.height = height;
+                    frame.pixels.resize((width * height) as usize, 0);
+                    rgba_to_bgra(canvas.data(), &mut frame.pixels);
+                }
+                self.blit(hwnd);
+                let mut pending = self.pending.borrow_mut();
+                pending.commands.append(&mut out.commands);
+                pending.requests.append(&mut out.requests);
+                pending.window.append(&mut out.window);
+                pending.clipboard = out.clipboard.take().or(pending.clipboard.take());
             }
-            self.blit(hwnd);
-            let mut pending = self.pending.borrow_mut();
-            pending.commands.append(&mut out.commands);
-            pending.requests.append(&mut out.requests);
-            pending.window.append(&mut out.window);
-            pending.clipboard = out.clipboard.take().or(pending.clipboard.take());
             let next = if view.dirty() {
                 Some(now)
             } else {
@@ -474,6 +550,24 @@ mod os {
             }
         }
 
+        /// Presents only `rect` of the cached frame (the orb's dirty rectangle).
+        fn blit_rect(&self, hwnd: HWND, rect: DirtyRect) {
+            let frame = self.frame.borrow();
+            if frame.width == 0 || frame.height == 0 || rect.is_empty() {
+                return;
+            }
+            let scratch = copy_rows(&frame.pixels, frame.width, rect);
+            // SAFETY: draws the copied rectangle into our own window's DC.
+            unsafe {
+                let dc = GetDC(Some(hwnd));
+                if dc.is_invalid() {
+                    return;
+                }
+                paint_rect(dc, &scratch, rect);
+                ReleaseDC(Some(hwnd), dc);
+            }
+        }
+
         fn blit(&self, hwnd: HWND) {
             let frame = self.frame.borrow();
             if frame.width == 0 || frame.height == 0 {
@@ -488,6 +582,40 @@ mod os {
                 paint_frame(dc, &frame);
                 ReleaseDC(Some(hwnd), dc);
             }
+        }
+    }
+
+    /// # Safety
+    /// `dc` must be a valid device context; `pixels` holds `rect.w * rect.h` BGRA words.
+    unsafe fn paint_rect(dc: windows::Win32::Graphics::Gdi::HDC, pixels: &[u32], rect: DirtyRect) {
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: rect.w as i32,
+                biHeight: -(rect.h as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // SAFETY: the buffer holds w*h 32-bit pixels for the described top-down DIB.
+        unsafe {
+            SetDIBitsToDevice(
+                dc,
+                rect.x as i32,
+                rect.y as i32,
+                rect.w,
+                rect.h,
+                0,
+                0,
+                0,
+                rect.h,
+                pixels.as_ptr().cast(),
+                &info,
+                DIB_RGB_COLORS,
+            );
         }
     }
 
@@ -877,6 +1005,22 @@ mod os {
             self.window.is_some()
         }
 
+        /// The "Naby AI" page of the Settings window: the same service and voice runtime the
+        /// assistant window uses, so edits in either window show in both. The page is built when
+        /// Settings opens and dropped with the window.
+        pub fn ai_settings_page(&self) -> Box<dyn naby_ui::settings::AiSettingsPage> {
+            let turn =
+                naby_ui::assistant::voice::SpokenTurn::new(unreachable_session(&self.service));
+            let bridge = VoiceBridge {
+                runtime: self.voice.clone(),
+                turn,
+            };
+            Box::new(naby_ui::settings::AssistantAiPage::new(
+                self.service.clone(),
+                Arc::new(bridge),
+            ))
+        }
+
         /// The widget tools and the options moved: recompute the offered pages.
         fn refresh_tools(&mut self) {
             let options = self.service.options();
@@ -892,6 +1036,7 @@ mod os {
                 if let Ok(mut inner) = open.shared.inner.try_borrow_mut() {
                     inner.theme = Theme::from_settings(settings);
                     inner.settings = settings.clone();
+                    inner.view.invalidate();
                 }
                 open.shared.render(None);
             }
@@ -1516,6 +1661,63 @@ mod tests {
         let off = reflow(RectI::new(1200, 50, 1920, 600), work, 1.0);
         assert_eq!(off.right, 1280);
         assert_eq!(off.width(), 720);
+    }
+
+    #[test]
+    fn the_dirty_rect_is_whole_pixels_inside_the_buffer() {
+        use naby_render::Rect;
+        let r = DirtyRect::of(Rect::new(16.4, 46.0, 70.0, 70.2), 720, 740);
+        assert_eq!(
+            r,
+            DirtyRect {
+                x: 16,
+                y: 46,
+                w: 71,
+                h: 71
+            }
+        );
+        // Clipped at the buffer edge, never negative.
+        let r = DirtyRect::of(Rect::new(-5.0, 700.0, 50.0, 80.0), 720, 740);
+        assert_eq!(
+            r,
+            DirtyRect {
+                x: 0,
+                y: 700,
+                w: 45,
+                h: 40
+            }
+        );
+        assert!(DirtyRect::of(Rect::new(800.0, 10.0, 20.0, 20.0), 720, 740).is_empty());
+    }
+
+    #[test]
+    fn only_the_dirty_rows_are_converted_and_presented() {
+        let (w, h) = (6u32, 4u32);
+        let src: Vec<u8> = (0..w * h).flat_map(|i| [i as u8, 1, 2, 255]).collect();
+        let mut dst = vec![0u32; (w * h) as usize];
+        let rect = DirtyRect {
+            x: 1,
+            y: 1,
+            w: 3,
+            h: 2,
+        };
+        rgba_to_bgra_rect(&src, &mut dst, w, rect);
+        for y in 0..h {
+            for x in 0..w {
+                let inside = (1..4).contains(&x) && (1..3).contains(&y);
+                let word = dst[(y * w + x) as usize];
+                if inside {
+                    let i = (y * w + x) as u8;
+                    assert_eq!(word, u32::from_le_bytes([2, 1, i, 255]), "({x},{y})");
+                } else {
+                    assert_eq!(word, 0, "({x},{y}) was touched");
+                }
+            }
+        }
+        let block = copy_rows(&dst, w, rect);
+        assert_eq!(block.len(), 6);
+        assert_eq!(block[0], dst[(w + 1) as usize]);
+        assert_eq!(block[3], dst[(2 * w + 1) as usize]);
     }
 
     #[test]

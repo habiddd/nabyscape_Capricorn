@@ -130,15 +130,24 @@ impl Overlay {
         if snaps_notice_pending(self) {
             add(Some(self.notice_deadline.max(now)));
         }
-        if self.expanded {
-            for page in self.panel.pages.values() {
-                add(page.next_frame(now));
-            }
+        for page in self.shown_pages() {
+            add(page.next_frame(now));
         }
         if self.pending_input_frame() {
             add(Some(now));
         }
         next
+    }
+
+    /// The pages on screen right now: the open page group or the hover face. Everything else the
+    /// overlay keeps alive (visited pages) contributes no frames and no service demand.
+    fn shown_pages(&self) -> impl Iterator<Item = &dyn crate::pages::Page> {
+        let on = self.expanded || self.peeking;
+        self.panel
+            .shown
+            .iter()
+            .filter(move |_| on)
+            .filter_map(|id| self.panel.pages.get(id).map(|p| p.as_ref()))
     }
 
     fn pending_input_frame(&self) -> bool {
@@ -176,10 +185,8 @@ impl Overlay {
         {
             demand.lyrics = true;
         }
-        if self.expanded {
-            for page in self.panel.pages.values() {
-                demand = demand.merge(page.demand());
-            }
+        for page in self.shown_pages() {
+            demand = demand.merge(page.demand());
         }
         if self.peeking && self.peek.id == "system" {
             demand.system = true;
@@ -201,6 +208,7 @@ impl Overlay {
         let origin = layout.origin;
         self.last_paint_origin = origin;
         self.hot.clear();
+        self.panel.shown.clear();
         self.paint_surface(canvas, origin, snaps);
         let s = self.scale;
         let rect = Rect::new(

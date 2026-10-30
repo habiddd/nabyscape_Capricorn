@@ -71,8 +71,9 @@ impl SettingsView {
                 let mut last_group = "";
                 for c in &CATEGORIES {
                     if c.group != last_group {
-                        let top = if c.group == "Personalize" { 0.0 } else { 18.0 };
-                        ui.gap(top);
+                        // C# gives "Personalize" a 0 top margin, which leaves it flush against the
+                        // item above; every group gets the same 18 px section gap here.
+                        ui.gap(18.0);
                         let st = ui.text_style(10.0, Weight::Regular, th.text_dim);
                         let h = ui.line_height(&st);
                         let r = ui.allocate(None, h);

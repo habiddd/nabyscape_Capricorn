@@ -2,7 +2,7 @@
 //! `Features/Productivity/CountdownView.cs`): heading and status, progress ring with the time
 //! left, Start / Pause / Resume and Reset, minute editors with steppers, and a hint line.
 
-use super::common::{Ctl, EditOpts, Interaction, Presence};
+use super::common::{Ctl, EditOpts, Interaction};
 use super::{Page, PageCtx};
 use chrono::{DateTime, Utc};
 use naby_core::command::Command;
@@ -56,7 +56,6 @@ struct Parsed {
 pub struct CountdownPage {
     focus: bool,
     ui: Interaction,
-    presence: Presence,
     st: Body,
 }
 
@@ -80,7 +79,6 @@ impl CountdownPage {
         CountdownPage {
             focus,
             ui: Interaction::default(),
-            presence: Presence::new(),
             st: Body {
                 focus,
                 minutes: String::new(),
@@ -558,7 +556,6 @@ impl Page for CountdownPage {
         input: &InputState,
         out: &mut Vec<Command>,
     ) -> bool {
-        self.presence.mark(ctx.snaps.now);
         self.st.sync(ctx);
         let mut c = Ctl::draw(canvas, ctx, input, out, &mut self.ui);
         self.st.layout(&mut c, rect);
@@ -567,10 +564,6 @@ impl Page for CountdownPage {
     }
 
     fn next_frame(&self, now: f64) -> Option<f64> {
-        self.presence.observe(now);
-        if !self.presence.active() {
-            return None;
-        }
         let blink = self.ui.next_frame(now);
         let ring = self.st.ring.next_frame(now);
         [self.st.next, blink, ring]
@@ -584,7 +577,6 @@ impl Page for CountdownPage {
     }
 
     fn on_hide(&mut self) {
-        self.presence.hide();
         self.ui.reset();
         self.st.started = false;
         self.st.next = None;
@@ -737,13 +729,6 @@ mod tests {
         run_timer(&mut h, 120.0, true);
         h.idle();
         assert_eq!(h.page.next_frame(h.snaps.now), None, "paused is static");
-        run_timer(&mut h, 120.0, false);
-        h.idle();
-        assert_eq!(
-            h.page.next_frame(h.snaps.now + 30.0),
-            None,
-            "hidden pages go quiet"
-        );
     }
 
     #[test]

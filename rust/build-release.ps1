@@ -16,7 +16,16 @@
 
   Whistle files come from rust/whistle.lock (written by the voice task): a JSON array of
   { "name", "arch" ("any"|"x64"|"arm64"), "url", "sha256" }. Every download is verified
-  against its pinned SHA-256 before it is packaged. This script never writes the lock file.
+  against its pinned SHA-256 before it is packaged.
+
+  Pinning: the lock is embedded in the executable (include_str!), and the program refuses Whistle
+  while any hash says TO_BE_PINNED. With -PinWhistle (implied automatically when any entry is
+  unpinned) the script first downloads every entry, computes its SHA-256 and rewrites the lock
+  file with the real hashes BEFORE cargo builds, then verifies the rewritten lock. If a libneedle
+  URL answers 404 the script lists the platform folder through the Hugging Face API
+  (https://huggingface.co/api/models/Cactus-Compute/needle3/tree/main/windows-x86_64) and takes
+  the .dll found there; it fails with a clear message when that is not exactly one file. Commit
+  the pinned rust/whistle.lock afterwards so the released source matches the released binary.
 
 .EXAMPLE
   ./build-release.ps1 -Tag v3.0.0
@@ -27,7 +36,8 @@ param(
     [string]$LockFile = (Join-Path $PSScriptRoot 'whistle.lock'),
     [string]$Cargo = 'cargo',
     [switch]$SkipTests,
-    [switch]$SkipSelfTest
+    [switch]$SkipSelfTest,
+    [switch]$PinWhistle
 )
 $ErrorActionPreference = 'Stop'
 if ($Tag -notmatch '^v\d+\.\d+\.\d+$') { throw 'Expected tag vMAJOR.MINOR.PATCH.' }
@@ -44,6 +54,75 @@ if (-not (Test-Path -LiteralPath $LockFile)) {
 }
 $lock = @(Get-Content -LiteralPath $LockFile -Raw | ConvertFrom-Json)
 if ($lock.Count -eq 0) { throw "$LockFile lists no files." }
+
+# --- pin the Whistle files (before anything is built: the lock is embedded in the exe) --------------
+function Get-FileSha256([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+
+function Test-Unpinned($Entry) { return ($Entry.sha256 -notmatch '^[A-Fa-f0-9]{64}$') }
+
+# Downloads $Url to $Path; returns $null on success or the HTTP status code of a failure.
+function Save-Url([string]$Url, [string]$Path) {
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
+        return $null
+    } catch {
+        $code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+        if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+        if ($code -eq 0) { throw "Download of $Url failed: $($_.Exception.Message)" }
+        return $code
+    }
+}
+
+# A Hugging Face resolve URL whose file moved: list the folder through the API and take the .dll.
+function Find-HuggingFaceDll($Entry) {
+    $found = $Entry.url -match '^https://huggingface\.co/(?<repo>[^/]+/[^/]+)/resolve/(?<rev>[^/]+)/(?<folder>.+)/[^/]+$'
+    if (-not $found) {
+        throw "$($Entry.name): the URL answered 404 and is not a Hugging Face file URL, so the folder cannot be listed. Fix rust/whistle.lock by hand."
+    }
+    $repo = $Matches.repo; $rev = $Matches.rev
+    $api = "https://huggingface.co/api/models/$repo/tree/$rev/$($Matches.folder)"
+    Write-Output "$($Entry.name): $($Entry.url) answered 404; listing $api"
+    try { $tree = @(Invoke-RestMethod -Uri $api -UseBasicParsing) } catch { throw "$($Entry.name): the URL answered 404 and the folder listing $api failed: $($_.Exception.Message)" }
+    $dlls = @($tree | Where-Object { $_.type -eq 'file' -and $_.path -like '*.dll' })
+    if ($dlls.Count -ne 1) {
+        $names = ($tree | ForEach-Object { $_.path }) -join ', '
+        throw "$($Entry.name): expected exactly one .dll in $api but found $($dlls.Count). Folder content: $names. Fix rust/whistle.lock by hand."
+    }
+    return "https://huggingface.co/$repo/resolve/$rev/$($dlls[0].path)"
+}
+
+if ($PinWhistle -or @($lock | Where-Object { Test-Unpinned $_ }).Count -gt 0) {
+    Write-Output 'Pinning rust/whistle.lock (downloading every entry and computing SHA-256).'
+    $pinDir = Join-Path ([IO.Path]::GetTempPath()) ('nabyscape-pin-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $pinDir | Out-Null
+    try {
+        $pinned = @()
+        $index = 0
+        foreach ($entry in $lock) {
+            if (-not $entry.name -or $entry.name -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid name in whistle.lock: $($entry.name)" }
+            if ($entry.url -notmatch '^https://') { throw "Only https URLs are accepted ($($entry.name))." }
+            $file = Join-Path $pinDir ("$index-" + $entry.name)
+            $index++
+            $url = $entry.url
+            $status = Save-Url $url $file
+            if ($status -eq 404 -and $entry.name -like '*.dll') {
+                $url = Find-HuggingFaceDll $entry
+                $status = Save-Url $url $file
+            }
+            if ($status) { throw "$($entry.name): download of $url failed with HTTP $status." }
+            if ((Get-Item -LiteralPath $file).Length -eq 0) { throw "$($entry.name): the download is empty." }
+            $hash = Get-FileSha256 $file
+            Write-Output "  $($entry.name) ($($entry.arch)) $hash"
+            $pinned += [ordered]@{ name = $entry.name; arch = $entry.arch; url = $url; sha256 = $hash }
+        }
+        $json = ConvertTo-Json -InputObject @($pinned) -Depth 4
+        [IO.File]::WriteAllText($LockFile, $json + "`n", [Text.UTF8Encoding]::new($false))
+    } finally { Remove-Item -LiteralPath $pinDir -Recurse -Force -ErrorAction SilentlyContinue }
+    # Verify what was written.
+    $lock = @(Get-Content -LiteralPath $LockFile -Raw | ConvertFrom-Json)
+    if (@($lock | Where-Object { Test-Unpinned $_ }).Count -gt 0) { throw "$LockFile still has unpinned entries after pinning." }
+    Write-Warning "rust/whistle.lock now holds real SHA-256 hashes. Commit it (git add rust/whistle.lock) so the source of this release matches the binary that embeds it."
+}
 foreach ($entry in $lock) {
     if (-not $entry.name -or $entry.name -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid name in whistle.lock: $($entry.name)" }
     if ($entry.arch -notin 'any', 'x64', 'arm64') { throw "Invalid arch for $($entry.name) in whistle.lock." }

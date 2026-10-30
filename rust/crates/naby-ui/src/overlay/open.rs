@@ -281,6 +281,7 @@ impl Overlay {
             );
             return;
         }
+        self.panel.shown.clone_from(&group);
         let measure_wide = group
             .iter()
             .any(|g| self.panel.pages.get(g).is_some_and(|p| p.wants_wide()));

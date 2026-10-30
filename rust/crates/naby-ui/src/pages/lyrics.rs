@@ -3,7 +3,7 @@
 //! [`LyricsView`] is drawn inside the media page; the `lyrics` page id hosts the same view on
 //! its own.
 
-use super::common::{Ctl, Interaction, Presence};
+use super::common::{Ctl, Interaction};
 use super::{Page, PageCtx};
 use crate::host::{Demand, Snapshots};
 use naby_core::color::Rgba;
@@ -260,7 +260,6 @@ impl LyricsView {
 #[derive(Default)]
 struct LyricsPage {
     ui: Interaction,
-    presence: Presence,
     view: LyricsView,
 }
 
@@ -281,7 +280,6 @@ impl Page for LyricsPage {
         input: &InputState,
         out: &mut Vec<Command>,
     ) -> bool {
-        self.presence.mark(ctx.snaps.now);
         let mut c = Ctl::draw(canvas, ctx, input, out, &mut self.ui);
         let view = Rect::new(rect.x, rect.y + c.px(6.0), rect.w, c.px(130.0));
         self.view.layout(&mut c, view);
@@ -290,18 +288,13 @@ impl Page for LyricsPage {
 
     fn demand(&self) -> Demand {
         Demand {
-            lyrics: self.presence.active(),
+            lyrics: true,
             ..Demand::default()
         }
     }
 
-    fn next_frame(&self, now: f64) -> Option<f64> {
-        self.presence.observe(now);
-        if self.presence.active() {
-            self.view.next
-        } else {
-            None
-        }
+    fn next_frame(&self, _now: f64) -> Option<f64> {
+        self.view.next
     }
 
     fn captures_pointer(&self) -> bool {
@@ -309,7 +302,6 @@ impl Page for LyricsPage {
     }
 
     fn on_hide(&mut self) {
-        self.presence.hide();
         self.ui.reset();
         self.view.reset();
     }
@@ -399,8 +391,6 @@ mod tests {
         let wake = h.page.next_frame(h.snaps.now).unwrap();
         assert!(wake - h.snaps.now <= 0.06);
         assert!(h.page.demand().lyrics);
-        h.page.on_hide();
-        assert!(!h.page.demand().lyrics);
     }
 
     #[test]

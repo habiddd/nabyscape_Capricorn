@@ -139,6 +139,9 @@ pub(crate) struct Panel {
     /// Content height beyond the viewport, device pixels.
     pub overflow: f32,
     pub last_input: InputState,
+    /// Ids of the pages drawn by the last paint pass (open page group or hover face). Only
+    /// these are asked for `next_frame` and `demand`; hidden or visited pages stay quiet.
+    pub shown: Vec<String>,
 }
 
 impl Default for Panel {
@@ -157,6 +160,7 @@ impl Default for Panel {
             measure: false,
             overflow: 0.0,
             last_input: InputState::default(),
+            shown: Vec::new(),
         }
     }
 }

@@ -60,7 +60,7 @@ mod widget_order;
 #[cfg(test)]
 mod tests;
 
-pub use ai::{AiContext, AiSettingsPage, AiTarget, DefaultAiPage};
+pub use ai::{AiContext, AiSettingsPage, AiTarget, AssistantAiPage, DefaultAiPage};
 pub use app_picker::AppChoice;
 pub use chrome::{caption_button_names, window_title, NAV_WIDTH, RAIL_WIDTH};
 pub use help::setting_description;
@@ -389,6 +389,11 @@ impl SettingsView {
     /// Replaces the default Naby AI page (assistant tasks call this once).
     pub fn set_ai_page(&mut self, page: Box<dyn AiSettingsPage>) {
         self.ai_page = page;
+    }
+
+    /// The Naby AI category is showing and a worker published something it displays.
+    pub fn ai_dirty(&self) -> bool {
+        self.current == "AI" && self.ai_page.dirty()
     }
 
     /// Pushes fresh host facts (monitors, hotkey status, update state, ...).

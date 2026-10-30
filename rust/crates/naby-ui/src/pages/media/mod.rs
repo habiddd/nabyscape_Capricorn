@@ -7,7 +7,7 @@ pub mod footer;
 #[cfg(test)]
 mod tests;
 
-use super::common::{ArtCache, Crossfade, Ctl, Interaction, Presence};
+use super::common::{ArtCache, Crossfade, Ctl, Interaction};
 use super::lyrics::{self, LyricsView};
 use super::mixer::{MixerEvent, MixerView};
 use super::{Page, PageCtx};
@@ -114,7 +114,6 @@ impl Default for Body {
 #[derive(Default)]
 struct MediaPage {
     ui: Interaction,
-    presence: Presence,
     st: Body,
 }
 
@@ -546,7 +545,6 @@ impl Page for MediaPage {
         input: &InputState,
         out: &mut Vec<Command>,
     ) -> bool {
-        self.presence.mark(ctx.snaps.now);
         self.st.sync(ctx);
         self.st.sample_wave(ctx);
         let mut c = Ctl::draw(canvas, ctx, input, out, &mut self.ui);
@@ -555,19 +553,14 @@ impl Page for MediaPage {
     }
 
     fn demand(&self) -> Demand {
-        let on = self.presence.active();
         Demand {
-            lyrics: on && self.st.shows_lyrics && !self.st.mixer_mode,
-            mixer: on && self.st.mixer_mode,
+            lyrics: self.st.shows_lyrics && !self.st.mixer_mode,
+            mixer: self.st.mixer_mode,
             ..Demand::default()
         }
     }
 
     fn next_frame(&self, now: f64) -> Option<f64> {
-        self.presence.observe(now);
-        if !self.presence.active() {
-            return None;
-        }
         let blink = self.ui.next_frame(now);
         [self.st.next, blink].into_iter().flatten().reduce(f64::min)
     }
@@ -581,7 +574,6 @@ impl Page for MediaPage {
     }
 
     fn on_hide(&mut self) {
-        self.presence.hide();
         self.ui.reset();
         self.st.footer.reset();
         self.st.mixer.reset();

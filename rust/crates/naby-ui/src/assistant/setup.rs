@@ -12,9 +12,11 @@ use naby_core::assistant::readiness::{
 use naby_core::assistant::Provider;
 use naby_core::command::Command;
 use naby_render::{TextEditOpts, Ui};
+use std::sync::Arc;
 
 use super::providers::{expander, field, pill, ProvidersOut, ProvidersView};
 use super::service::{AssistantService, KeyChoice, OpId, OpResult};
+use super::voice::{VoiceHost, VoicePage, VoiceSettingsOut, VoiceSettingsView};
 
 /// The categories of the AI setup (`readiness::SETUP_SECTIONS`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -80,6 +82,9 @@ pub struct SetupView {
     summary_open: bool,
     config_open: bool,
     executable: String,
+    /// The voice setup pages (Voice setup, Wake word, Models, Check audio) once the host
+    /// connected its voice runtime; until then the Voice tab shows a short summary.
+    voice: Option<VoiceSettingsView>,
 }
 
 impl SetupView {
@@ -98,7 +103,31 @@ impl SetupView {
             summary_open: false,
             config_open: false,
             executable,
+            voice: None,
         }
+    }
+
+    /// Connects the Voice tab to the host's voice runtime (the real voice setup pages).
+    pub fn set_voice_host(&mut self, host: Arc<dyn VoiceHost>) {
+        self.voice = Some(VoiceSettingsView::new(self.service.clone(), host));
+    }
+
+    /// The voice setup pages, when connected.
+    pub fn voice_view(&mut self) -> Option<&mut VoiceSettingsView> {
+        self.voice.as_mut()
+    }
+
+    /// Opens the Voice tab on one of its pages (`OpenVoiceSetup`, `OpenVoiceChecks`).
+    pub fn open_voice(&mut self, page: VoicePage) {
+        self.open(SetupTab::Voice);
+        if let Some(voice) = &mut self.voice {
+            voice.open(page);
+        }
+    }
+
+    /// A worker published something the visible page shows (check result, install progress).
+    pub fn voice_dirty(&self) -> bool {
+        self.voice.as_ref().is_some_and(|v| v.dirty())
     }
 
     pub fn tab(&self) -> SetupTab {
@@ -110,6 +139,11 @@ impl SetupView {
             self.providers.cancel_check();
         }
         self.tab = tab;
+    }
+
+    /// Unsaved connection edits exist (`HasProviderDraft`).
+    pub fn has_provider_draft(&self) -> bool {
+        self.providers.has_draft()
     }
 
     pub fn providers(&mut self) -> &mut ProvidersView {
@@ -152,6 +186,9 @@ impl SetupView {
         self.hermes.op = None;
         self.hermes.key.clear();
         self.service.cancel();
+        if let Some(voice) = &mut self.voice {
+            voice.on_hide();
+        }
     }
 
     pub fn show(&mut self, ui: &mut Ui<'_>, out: &mut SetupOut) {
@@ -238,6 +275,12 @@ impl SetupView {
     }
 
     fn show_voice(&mut self, ui: &mut Ui<'_>, out: &mut SetupOut) {
+        if let Some(voice) = &mut self.voice {
+            let mut inner = VoiceSettingsOut::default();
+            voice.show(ui, &mut inner);
+            out.commands.append(&mut inner.commands);
+            return;
+        }
         let ready = self.service.setup();
         ui.heading_sized("Talk hands-free", 20.0);
         ui.label_dim("Voice runs in its own room. The microphone starts only when you choose Start, and models load only while a conversation is active.");

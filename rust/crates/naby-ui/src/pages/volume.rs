@@ -3,7 +3,7 @@
 //! On its own it is the "Volume" heading with the level button and the same popover: slider,
 //! mute, microphone mute, output list and the way into the mixer.
 
-use super::common::{Ctl, Interaction, Presence};
+use super::common::{Ctl, Interaction};
 use super::media::footer::{Footer, FooterEvent};
 use super::mixer::{MixerEvent, MixerView};
 use super::{Page, PageCtx};
@@ -23,7 +23,6 @@ fn covered_by_media(ctx: &PageCtx) -> bool {
 #[derive(Default)]
 struct VolumePage {
     ui: Interaction,
-    presence: Presence,
     st: Body,
 }
 
@@ -103,7 +102,6 @@ impl Page for VolumePage {
         if covered_by_media(ctx) {
             return false;
         }
-        self.presence.mark(ctx.snaps.now);
         let mut c = Ctl::draw(canvas, ctx, input, out, &mut self.ui);
         self.st.layout(&mut c, rect);
         false
@@ -111,14 +109,13 @@ impl Page for VolumePage {
 
     fn demand(&self) -> Demand {
         Demand {
-            mixer: self.presence.active() && self.st.mixer_mode,
+            mixer: self.st.mixer_mode,
             ..Demand::default()
         }
     }
 
-    fn next_frame(&self, now: f64) -> Option<f64> {
-        self.presence.observe(now);
-        self.presence.active().then_some(self.st.next).flatten()
+    fn next_frame(&self, _now: f64) -> Option<f64> {
+        self.st.next
     }
 
     fn captures_pointer(&self) -> bool {
@@ -126,7 +123,6 @@ impl Page for VolumePage {
     }
 
     fn on_hide(&mut self) {
-        self.presence.hide();
         self.ui.reset();
         self.st = Body::default();
     }

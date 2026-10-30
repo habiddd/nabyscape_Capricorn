@@ -1,7 +1,7 @@
 //! The `clock` page: the time at 32 DIP and the date below it (`OverlayWindow.Update`'s
 //! `clock` / `date` blocks), honouring 24 hour, seconds and show-date settings.
 
-use super::common::{Ctl, Interaction, Presence};
+use super::common::{Ctl, Interaction};
 use super::{Page, PageCtx};
 use chrono::Timelike;
 use naby_core::command::Command;
@@ -31,7 +31,6 @@ pub fn date_text(wall: &chrono::DateTime<chrono::Local>) -> String {
 #[derive(Default)]
 struct ClockPage {
     ui: Interaction,
-    presence: Presence,
     /// What the strings were built from: the displayed second (or minute) and the settings.
     key: Option<(i64, bool, bool, bool)>,
     time: String,
@@ -124,20 +123,17 @@ impl Page for ClockPage {
         input: &InputState,
         out: &mut Vec<Command>,
     ) -> bool {
-        self.presence.mark(ctx.snaps.now);
         self.refresh(ctx);
         let mut c = Ctl::draw(canvas, ctx, input, out, &mut self.ui);
         Self::layout(&mut c, rect, &self.time, &self.date);
         false
     }
 
-    fn next_frame(&self, now: f64) -> Option<f64> {
-        self.presence.observe(now);
-        self.presence.active().then_some(self.next).flatten()
+    fn next_frame(&self, _now: f64) -> Option<f64> {
+        self.next
     }
 
     fn on_hide(&mut self) {
-        self.presence.hide();
         self.key = None;
         self.next = None;
     }
@@ -186,7 +182,6 @@ mod tests {
         h.idle();
         let at = h.page.next_frame(h.snaps.now).expect("second tick");
         assert!(at - h.snaps.now <= 1.1);
-        assert_eq!(h.page.next_frame(h.snaps.now + 20.0), None);
     }
 
     #[test]

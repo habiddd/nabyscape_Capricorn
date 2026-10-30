@@ -497,3 +497,133 @@ fn caption_buttons_ask_the_host_to_close_minimize_and_maximize() {
     save("assistant-window", &rig.canvas);
     let _ = &rig.f;
 }
+
+// ----- orb-only repaints ---------------------------------------------------------------------
+
+#[test]
+fn only_the_orb_repaints_while_only_the_orb_animates() {
+    use super::window::input_unchanged;
+    let Some(mut rig) = WinRig::new(true, |_| Ok(chat_reply("OK"))) else {
+        return;
+    };
+    rig.view.open_setup(SetupTab::Overview);
+    rig.settle();
+    // The last full frame leaves the dirty rectangle behind; it is small and inside the page.
+    let mut env_input = InputState::default();
+    rig.now += 0.5;
+    env_input.time = rig.now;
+    let env = WindowEnv {
+        settings: &rig.settings,
+        theme: &rig.theme,
+        scale: rig.scale,
+        maximized: false,
+        visible: true,
+        active: true,
+    };
+    let mut out = WindowOut::default();
+    rig.view
+        .frame(&mut rig.canvas, &rig.fonts, &env_input, &env, &mut out);
+    let before = rig.canvas.data().to_vec();
+    let mut tick = InputState::default();
+    tick.time = rig.now + 0.05;
+    let rect = rig
+        .view
+        .frame_orb_only(&mut rig.canvas, &tick, &env)
+        .expect("the idle orb animates alone");
+    assert!(rect.w * rect.h < 0.1 * 720.0 * 740.0, "{rect:?}");
+    assert!(rect.x >= 0.0 && rect.y >= 38.0 && rect.right() <= 720.0);
+    let after = rig.canvas.data().to_vec();
+    // Nothing outside the rectangle changed.
+    let width = rig.canvas.width() as usize;
+    let mut changed_inside = 0;
+    for (i, (a, b)) in before
+        .chunks_exact(4)
+        .zip(after.chunks_exact(4))
+        .enumerate()
+    {
+        if a != b {
+            let (x, y) = ((i % width) as f32, (i / width) as f32);
+            assert!(
+                x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom(),
+                "pixel ({x},{y}) outside {rect:?} changed"
+            );
+            changed_inside += 1;
+        }
+    }
+    assert!(changed_inside > 0, "the orb moved");
+    // A full frame at the same time paints exactly what the partial frame did.
+    let mut same = InputState::default();
+    same.time = tick.time;
+    let mut out = WindowOut::default();
+    rig.view
+        .frame(&mut rig.canvas, &rig.fonts, &same, &env, &mut out);
+    // (The clip mask rounds anti-aliased edge pixels by at most a couple of levels.)
+    let worst = after
+        .iter()
+        .zip(rig.canvas.data())
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    assert!(worst <= 3, "partial and full frames differ by {worst}");
+    // Input, other modes and unknown changes need the full repaint.
+    let mut moved = InputState::at(300.0, 300.0);
+    moved.time = tick.time + 0.05;
+    assert!(!input_unchanged(&InputState::default(), &moved));
+    assert!(rig
+        .view
+        .frame_orb_only(&mut rig.canvas, &moved, &env)
+        .is_none());
+    let mut later = InputState::default();
+    later.time = tick.time + 0.05;
+    assert!(rig
+        .view
+        .frame_orb_only(&mut rig.canvas, &later, &env)
+        .is_some());
+    rig.view.invalidate();
+    assert!(rig
+        .view
+        .frame_orb_only(&mut rig.canvas, &later, &env)
+        .is_none());
+    rig.view.open_chat();
+    assert!(rig
+        .view
+        .frame_orb_only(&mut rig.canvas, &later, &env)
+        .is_none());
+}
+
+#[test]
+fn the_dirty_rect_hugs_the_orb_and_stays_inside_the_page() {
+    use super::window::{orb_dirty_rect, orb_frame_cap};
+    let page = Rect::new(0.0, 38.0, 720.0, 702.0);
+    let orb = Rect::new(24.0, 54.0, 54.0, 54.0);
+    let r = orb_dirty_rect(orb, 8.0, page).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (16.0, 46.0, 70.0, 70.0));
+    // Fractional positions snap outward to whole pixels.
+    let r = orb_dirty_rect(Rect::new(24.4, 54.6, 54.0, 54.0), 8.0, page).unwrap();
+    assert_eq!((r.x, r.y, r.right(), r.bottom()), (16.0, 46.0, 87.0, 117.0));
+    // Near the caption bar the rectangle is cut at the page.
+    let r = orb_dirty_rect(Rect::new(24.0, 40.0, 54.0, 54.0), 8.0, page).unwrap();
+    assert_eq!(r.y, 38.0);
+    // Entirely outside: nothing to repaint.
+    assert!(orb_dirty_rect(Rect::new(24.0, -400.0, 54.0, 54.0), 8.0, page).is_none());
+    // The cap follows the Performance profile: Hemat 30 fps, the others stay at 60.
+    let mut s = presets::recommended();
+    s.performance = "Hemat".into();
+    assert_eq!(orb_frame_cap(&s), 30);
+    s.performance = "Auto".into();
+    assert_eq!(orb_frame_cap(&s), 60);
+}
+
+#[test]
+fn the_orb_frame_cap_stretches_the_wake_interval() {
+    use super::orb::Orb;
+    use naby_core::assistant::State;
+    let mut orb = Orb::new();
+    orb.set_state(State::Thinking, 10.0);
+    let own = orb.next_frame(10.0).unwrap() - 10.0;
+    assert!((own - 1.0 / 30.0).abs() < 1e-9);
+    orb.set_frame_cap(30);
+    assert!((orb.next_frame(10.0).unwrap() - 10.0 - 1.0 / 30.0).abs() < 1e-9);
+    orb.set_frame_cap(15);
+    assert!((orb.next_frame(10.0).unwrap() - 10.0 - 1.0 / 15.0).abs() < 1e-9);
+}

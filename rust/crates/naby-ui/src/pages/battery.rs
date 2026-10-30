@@ -1,7 +1,7 @@
 //! The `battery` page: "63% · Charging" / "63% · Battery" (`OverlayWindow.Update`). The WPF
 //! card is collapsed on a desktop; here the line says why there is nothing to show instead.
 
-use super::common::{Ctl, Interaction, Presence};
+use super::common::{Ctl, Interaction};
 use super::{Page, PageCtx};
 use naby_core::command::Command;
 use naby_core::system::battery::BatterySnapshot;
@@ -25,7 +25,6 @@ pub fn line(battery: &BatterySnapshot) -> (String, bool) {
 #[derive(Default)]
 struct BatteryPage {
     ui: Interaction,
-    presence: Presence,
     version: u64,
     text: String,
     primary: bool,
@@ -75,7 +74,6 @@ impl Page for BatteryPage {
         input: &InputState,
         out: &mut Vec<Command>,
     ) -> bool {
-        self.presence.mark(ctx.snaps.now);
         self.refresh(ctx);
         let mut c = Ctl::draw(canvas, ctx, input, out, &mut self.ui);
         Self::layout(&mut c, rect, &self.text, self.primary);
@@ -83,7 +81,6 @@ impl Page for BatteryPage {
     }
 
     fn on_hide(&mut self) {
-        self.presence.hide();
         self.version = 0;
         self.text.clear();
     }

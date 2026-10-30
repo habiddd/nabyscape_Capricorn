@@ -149,6 +149,8 @@ pub struct Orb {
     bounce: Option<(f64, bool)>,
     glance: Option<(f64, f32)>,
     band: Option<Path>,
+    /// Frames per second the host allows the face (0 = no cap beyond its own steps).
+    frame_cap: u32,
 }
 
 impl Default for Orb {
@@ -187,6 +189,22 @@ impl Orb {
             bounce: None,
             glance: None,
             band: parse_path("M12,50 L12,43 C12,-3 88,-3 88,43 L88,50"),
+            frame_cap: 0,
+        }
+    }
+
+    /// Caps the animation at `fps` frames per second (`FrameBudget::limit`; "Hemat" is 30).
+    /// 0 removes the cap. The face never runs faster than its own 30 fps live step.
+    pub fn set_frame_cap(&mut self, fps: u32) {
+        self.frame_cap = fps;
+    }
+
+    /// The interval between animation frames given the face's own step and the cap.
+    pub fn step(&self, own: f64) -> f64 {
+        if self.frame_cap == 0 {
+            own
+        } else {
+            own.max(1.0 / f64::from(self.frame_cap.clamp(1, 240)))
         }
     }
 
@@ -462,7 +480,7 @@ impl Orb {
             || self.bounce.is_some()
             || self.glance.is_some()
         {
-            return Some(now + LIVE_STEP);
+            return Some(now + self.step(LIVE_STEP));
         }
         if self.frames_needed() {
             let step = if self.idle_motion() {
@@ -470,7 +488,7 @@ impl Orb {
             } else {
                 LIVE_STEP
             };
-            return Some(now + step);
+            return Some(now + self.step(step));
         }
         self.next_blink.map(|t| t.max(now))
     }
