@@ -132,4 +132,44 @@ Notices contain `LICENSE`, `THIRD-PARTY-NOTICES.txt` (from `cargo about` when in
 
 ## Known gaps
 
-*(To be filled in by the whole-branch review.)*
+Status as of the whole-branch review. Everything below compiles for Windows and passes the Linux
+test suite; **no Windows-only code path has been run on a real Windows machine yet**, so the first
+item is the biggest one.
+
+### Needs a Windows run before release
+- Every OS path is compile- and clippy-checked only: layered dock window, tray, hotkeys, SMTC media,
+  WASAPI audio/loopback/capture/playback, mixer, WMI (hardware, brightness), clipboard listener,
+  downloads watcher, launcher icons, OLE drag-drop, GDI capture, DWM backdrops, file dialogs,
+  Credential Manager, install/uninstall/update helpers, WinVerifyTrust, Windows speech recognition.
+- `rust/whistle.lock` hashes are `TO_BE_PINNED`; `build-release.ps1` pins them, and the pinned lock
+  must be committed. The exact `libneedle.dll` path inside the HF `needle3` platform folders and the
+  Whistle weight licence were not verifiable from the build environment.
+- Memory has not been measured; use `tools/measure-memory.ps1`. Target: idle dock ≤ 30 MB private.
+
+### Behavior differences from the C# 2.24 build
+- Fullscreen apps hide the dock instead of tucking it.
+- Follow-monitor mode jumps between monitors instead of sliding.
+- Not ported: middle-click action, cover gestures, the Ctrl+K command bar (and its button on the
+  shortcuts page), the non-compact "classic" panel layout.
+- Detached previews reuse the full panel pages (no bespoke mini views, no minimize / "On top" toggle).
+- Dock editing works on the dock's current monitor only; the Alt-held handles are not ported.
+- Mixer rows show monogram tiles instead of app icons; the peek mixer button opens the media page.
+- Source, output and city pickers grow inline instead of scrolling popups; weather hourly tooltip
+  and fit-to-height are not ported. The battery card shows a status line instead of collapsing.
+- Calendar month/day names are English only.
+- Screen/window capture uses GDI (PrintWindow/BitBlt) instead of Windows Graphics Capture, so
+  protected or overlay-rendered windows may capture black.
+- Loopback spectrum captures the default output only (the peak meter covers every endpoint).
+- Brightness feedback polls WMI with a 1 s wait instead of an async event sink.
+- Settings: search results replace the page; native title bar instead of the WPF custom one;
+  preview examples are static; IME composition window placement is not handled (committed text works).
+- The interactive installer uses standard dialogs instead of the WPF installer window; a rollback
+  restores the exe and profile but keeps the newer Whistle files.
+- Voice: wake listening uses the Windows default microphone (Windows.Media.SpeechRecognition has no
+  input selection); live captions do not use Whistle's streaming API yet; realtime image sharing has
+  no UI button; ARM64 native speech packs stay unavailable, as in C#.
+- Whistle covers en/de/fr/es/it/nl/pl only; other languages (e.g. Indonesian) need a speech pack,
+  external server or realtime provider.
+- Assistant attachments: Office text extraction is supported (DOCX/PPTX/XLSX/ODT); PDF/video frame
+  rendering is not.
+- Timer display follows C# `TimeSpan` formatting (hours wrap at 24).
