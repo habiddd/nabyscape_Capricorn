@@ -2,7 +2,7 @@
 //! audio session or output with an icon, name, percentage, mute and a volume slider. The media
 //! page swaps its body for [`MixerView`]; the `mixer` page id hosts the same view on its own.
 
-use super::common::{Ctl, Interaction, Presence};
+use super::common::{Ctl, Interaction};
 use super::{Page, PageCtx};
 use crate::host::Demand;
 use naby_core::color::Rgba;
@@ -327,7 +327,6 @@ impl MixerView {
 #[derive(Default)]
 struct MixerPage {
     ui: Interaction,
-    presence: Presence,
     view: MixerView,
     opened: bool,
 }
@@ -351,7 +350,6 @@ impl Page for MixerPage {
         input: &InputState,
         out: &mut Vec<Command>,
     ) -> bool {
-        self.presence.mark(ctx.snaps.now);
         if !self.opened {
             self.opened = true;
             self.view.open();
@@ -363,13 +361,12 @@ impl Page for MixerPage {
 
     fn demand(&self) -> Demand {
         Demand {
-            mixer: self.presence.active(),
+            mixer: true,
             ..Demand::default()
         }
     }
 
-    fn next_frame(&self, now: f64) -> Option<f64> {
-        self.presence.observe(now);
+    fn next_frame(&self, _now: f64) -> Option<f64> {
         None
     }
 
@@ -378,7 +375,6 @@ impl Page for MixerPage {
     }
 
     fn on_hide(&mut self) {
-        self.presence.hide();
         self.ui.reset();
         self.view.reset();
         self.opened = false;
@@ -435,7 +431,6 @@ mod tests {
         let Some(mut h) = Harness::new("mixer") else {
             return;
         };
-        assert!(!h.page.demand().mixer);
         h.idle();
         assert!(h.page.demand().mixer);
         assert_eq!(h.commands(), vec![Command::MixerRefresh]);

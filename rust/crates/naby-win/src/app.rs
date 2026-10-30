@@ -75,16 +75,12 @@ pub trait Surface {
     fn snapshots(&self) -> Option<naby_ui::host::Snapshots> {
         None
     }
-    /// Runs a command another window produced (media, timers, notices, ...). True = repaint.
-    fn run_command(&mut self, _command: naby_core::command::Command) -> bool {
-        false
-    }
     /// Things only the app shell can do (settings window, tray balloons, quit).
     fn take_actions(&mut self) -> Vec<ShellAction> {
         Vec::new()
     }
-    /// Runs commands produced outside the dock (the assistant window). True when a repaint is
-    /// needed.
+    /// Runs commands produced outside the dock (assistant, settings, notices, ...). True when a
+    /// repaint is needed.
     fn run_commands(&mut self, _commands: Vec<Command>) -> bool {
         false
     }
@@ -601,6 +597,7 @@ mod os {
                 return;
             }
             let mut view = SettingsView::new(self.settings.clone(), Some(self.store.clone()));
+            view.set_ai_page(self.assistant.ai_settings_page());
             if let Some(p) = &page {
                 view.open_page(p);
             }
@@ -680,10 +677,7 @@ mod os {
                         self.settings = loaded;
                         self.apply_settings();
                         if matches!(done, WelcomeDone::Finished { setup_ai: true }) {
-                            self.notify(
-                                "Assistant",
-                                "The assistant is not part of this build of the new shell yet.",
-                            );
+                            self.open_assistant();
                         }
                     }
                     SettingsOutput::Request(request) => self.settings_request(request),
@@ -783,12 +777,12 @@ mod os {
                         "Open Settings > Application to install and restart when ready.".to_owned(),
                     ),
                 };
-                let changed = self.surface.run_command(Command::Notify {
+                let changed = self.surface.run_commands(vec![Command::Notify {
                     kind: naby_core::notifications::NoticeKind::Updates,
                     title,
                     detail,
                     files: None,
-                });
+                }]);
                 self.after_surface(changed);
             }
             if self.settings_window.is_some() {
@@ -820,17 +814,19 @@ mod os {
         fn aux_command(&mut self, command: Command) {
             match command {
                 Command::Quit => self.quit = true,
-                Command::OpenAssistant | Command::OpenVoice => self.notify(
-                    "Assistant",
-                    "The assistant is not part of this build of the new shell yet.",
-                ),
+                Command::OpenAssistant => self.open_assistant(),
+                Command::OpenVoice => {
+                    self.assistant.open_voice(&self.monitors, false);
+                    let changed = self.assistant_wake();
+                    self.after_surface(changed);
+                }
                 Command::OpenSettings => self.open_settings(None),
                 Command::OpenSettingsPage(page) => self.open_settings(Some(page)),
                 Command::CopyText(text) => {
                     let _ = crate::text_clipboard::set_text(None, &text);
                 }
                 other => {
-                    let changed = self.surface.run_command(other);
+                    let changed = self.surface.run_commands(vec![other]);
                     self.after_surface(changed);
                 }
             }
@@ -892,12 +888,14 @@ mod os {
                     let mut changed = self.surface.wake();
                     changed |= self.assistant_wake();
                     self.after_surface(changed);
+                    self.refresh_ai_settings();
                 }
                 HostEvent::Assistant => {
                     let commands = self.assistant.on_event();
                     let mut changed = self.run_commands(commands);
                     changed |= self.assistant_wake();
                     self.after_surface(changed);
+                    self.refresh_ai_settings();
                 }
                 HostEvent::Hotkey(action) => {
                     let signal = match action {
@@ -970,6 +968,19 @@ mod os {
         fn signal(&mut self, signal: Signal) {
             let changed = self.surface.signal(signal);
             self.after_surface(changed);
+        }
+
+        /// A worker published (provider check, model install, audio check): repaint the Naby AI
+        /// page when Settings shows it.
+        fn refresh_ai_settings(&mut self) {
+            let dirty = self
+                .settings_window
+                .as_mut()
+                .and_then(|w| w.settings_view())
+                .is_some_and(|v| v.ai_dirty());
+            if dirty {
+                let _ = self.tx.send(HostEvent::AuxInput(AuxWindow::Settings));
+            }
         }
 
         /// Opens the assistant window (or brings it forward) on the dock's monitor.

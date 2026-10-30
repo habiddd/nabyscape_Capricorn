@@ -419,6 +419,9 @@ impl Overlay {
         input: Option<&InputState>,
     ) {
         if active {
+            if !self.panel.shown.iter().any(|s| s == id) {
+                self.panel.shown.push(id.to_owned());
+            }
             // A page can draw its own face.
             let page = self
                 .panel

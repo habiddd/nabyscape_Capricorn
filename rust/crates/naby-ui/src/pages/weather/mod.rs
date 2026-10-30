@@ -4,7 +4,7 @@
 
 pub mod art;
 
-use super::common::{Ctl, EditOpts, Interaction, Presence};
+use super::common::{Ctl, EditOpts, Interaction};
 use super::{Page, PageCtx};
 use crate::host::{Demand, PlaceSearchState, WeatherStatus};
 use chrono::Local;
@@ -100,7 +100,6 @@ fn model_of(data: &wx::WeatherSnapshot) -> Model {
 #[derive(Default)]
 struct WeatherPage {
     ui: Interaction,
-    presence: Presence,
     st: Body,
 }
 
@@ -651,7 +650,6 @@ impl Page for WeatherPage {
         input: &InputState,
         out: &mut Vec<Command>,
     ) -> bool {
-        self.presence.mark(ctx.snaps.now);
         self.st.sync(ctx);
         let mut c = Ctl::draw(canvas, ctx, input, out, &mut self.ui);
         self.st.layout(&mut c, rect);
@@ -675,16 +673,12 @@ impl Page for WeatherPage {
 
     fn demand(&self) -> Demand {
         Demand {
-            weather: self.presence.active(),
+            weather: true,
             ..Demand::default()
         }
     }
 
     fn next_frame(&self, now: f64) -> Option<f64> {
-        self.presence.observe(now);
-        if !self.presence.active() {
-            return None;
-        }
         let drift = self.st.animate.then(|| now + 1.0 / 24.0);
         [drift, self.ui.next_frame(now)]
             .into_iter()
@@ -697,7 +691,6 @@ impl Page for WeatherPage {
     }
 
     fn on_hide(&mut self) {
-        self.presence.hide();
         self.ui.reset();
         self.st = Body::default();
     }
@@ -839,11 +832,8 @@ mod tests {
         let Some(mut h) = Harness::new("weather") else {
             return;
         };
-        assert!(!h.page.demand().weather);
         h.idle();
         assert!(h.page.demand().weather);
-        h.page.next_frame(h.snaps.now + 30.0);
-        assert!(!h.page.demand().weather);
     }
 
     #[test]

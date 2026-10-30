@@ -405,6 +405,25 @@ fn external_settings_changes_are_adopted_and_described() {
 }
 
 #[test]
+fn every_navigation_group_has_a_section_gap_above_its_label() {
+    let Some(h) = harness() else { return };
+    let home = h.rect("nav:Home");
+    let look = h.rect("nav:Appearance");
+    let ambience = h.rect("nav:Ambience");
+    let layout = h.rect("nav:Layout");
+    let motion = h.rect("nav:Motion");
+    // Same pitch inside a group; a label (10 px text) plus the 18 px gap between groups.
+    let pitch = ambience.y - look.y;
+    assert!(pitch > 40.0 && pitch < 46.0, "{pitch}");
+    let into_group = look.y - home.y;
+    assert!(
+        into_group >= pitch + 18.0 + 6.0,
+        "Start here sits flush against Personalize: {into_group} vs {pitch}"
+    );
+    assert!(layout.y - motion.y >= pitch + 18.0 + 6.0);
+}
+
+#[test]
 fn the_ai_page_exposes_a_hook_and_a_default_stub() {
     struct Probe(std::rc::Rc<std::cell::Cell<Option<AiTarget>>>);
     impl AiSettingsPage for Probe {

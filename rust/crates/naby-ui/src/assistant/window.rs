@@ -106,6 +106,62 @@ pub struct WindowEnv<'a> {
     pub active: bool,
 }
 
+/// What the last full Setup frame left behind for orb-only repaints.
+#[derive(Debug, Clone, Copy)]
+struct OrbSpot {
+    /// The orb's square (device pixels).
+    rect: Rect,
+    /// The pixels the orb can touch (whole pixels, inside the page).
+    dirty: Rect,
+    /// Page background behind the orb.
+    background: naby_core::color::Rgba,
+}
+
+/// What a frame depended on besides the pointer: a change forces a full repaint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FrameKey {
+    size: (u32, u32),
+    scale: f32,
+    maximized: bool,
+    visible: bool,
+    active: bool,
+}
+
+/// The region of the page the orb can touch: its square grown by `margin` (bob, squash, glow
+/// and the headphones), snapped outward to whole pixels and kept inside `bounds`. `None` when
+/// nothing is left.
+pub fn orb_dirty_rect(orb: Rect, margin: f32, bounds: Rect) -> Option<Rect> {
+    let x0 = (orb.x - margin).floor();
+    let y0 = (orb.y - margin).floor();
+    let x1 = (orb.right() + margin).ceil();
+    let y1 = (orb.bottom() + margin).ceil();
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
+        .intersect(&bounds)
+        .filter(|r| r.w >= 1.0 && r.h >= 1.0)
+}
+
+/// True when `now` carries no pointer, key, text or wheel activity beyond `before`: the same
+/// pointer position and button state, no edges. The clock (`time`) is ignored.
+pub fn input_unchanged(before: &InputState, now: &InputState) -> bool {
+    before.pointer == now.pointer
+        && before.down == now.down
+        && before.shift == now.shift
+        && before.ctrl == now.ctrl
+        && !now.pressed
+        && !now.released
+        && now.wheel == (0.0, 0.0)
+        && now.keys.is_empty()
+        && now.text.is_empty()
+        && now.paste.is_none()
+}
+
+/// The orb's frame cap for the Performance setting (`FrameBudget::limit`): "Hemat" runs the
+/// face at 30 fps, the other profiles leave it at its own step.
+pub fn orb_frame_cap(settings: &Settings) -> u32 {
+    let budget = naby_core::motion::frame::FrameBudget::new(&settings.performance, 60);
+    budget.limit(false, false, 0.0).min(60)
+}
+
 pub struct AssistantWindowView {
     service: AssistantService,
     session: Arc<ChatSession>,
@@ -118,6 +174,11 @@ pub struct AssistantWindowView {
     seen_service: u64,
     next_wake: Option<f64>,
     pressed_button: Option<usize>,
+    /// Where the orb sits after the last full Setup frame (`None` in other modes or when the
+    /// next frame must repaint everything).
+    orb_spot: Option<OrbSpot>,
+    last_key: Option<FrameKey>,
+    last_input: InputState,
 }
 
 impl AssistantWindowView {
@@ -134,7 +195,16 @@ impl AssistantWindowView {
             seen_service: 0,
             next_wake: None,
             pressed_button: None,
+            orb_spot: None,
+            last_key: None,
+            last_input: InputState::default(),
         }
+    }
+
+    /// The next frame must repaint the whole window (settings, theme or layout inputs changed
+    /// outside the view).
+    pub fn invalidate(&mut self) {
+        self.orb_spot = None;
     }
 
     pub fn mode(&self) -> Mode {
@@ -161,6 +231,7 @@ impl AssistantWindowView {
 
     /// Connects the voice room to the host's voice runtime.
     pub fn set_voice(&mut self, host: Arc<dyn VoiceHost>) {
+        self.setup.set_voice_host(host.clone());
         self.voice = VoiceRoom::new(self.service.clone(), host);
     }
 
@@ -182,13 +253,20 @@ impl AssistantWindowView {
 
     /// Something changed that needs a frame (a worker published, a check finished).
     pub fn dirty(&self) -> bool {
-        self.chat.dirty()
-            || self.seen_service != self.service.revision()
-            || (self.mode == Mode::Voice && self.voice.dirty())
+        // Only the page on screen asks for frames: the chat keeps its own "seen" counters, which
+        // stay behind while another page is shown and would otherwise repaint without end.
+        self.seen_service != self.service.revision()
+            || match self.mode {
+                Mode::Chat => self.chat.dirty(),
+                Mode::Setup => self.setup.voice_dirty(),
+                Mode::Voice => self.voice.dirty(),
+            }
     }
 
     pub fn next_frame(&self, now: f64) -> Option<f64> {
-        let chat = self.chat.next_frame(now);
+        let chat = (self.mode == Mode::Chat)
+            .then(|| self.chat.next_frame(now))
+            .flatten();
         let own = match self.mode {
             Mode::Setup => self.orb.next_frame(now),
             Mode::Voice => self.voice.next_frame(now),
@@ -208,11 +286,57 @@ impl AssistantWindowView {
         self.orb.set_visible(false);
         self.mem.clear();
         self.next_wake = None;
+        self.orb_spot = None;
+        self.last_key = None;
     }
 
     pub fn shutdown(&mut self) {
         self.on_hide();
         self.session.shutdown();
+    }
+
+    fn key(canvas: &Canvas, env: &WindowEnv) -> FrameKey {
+        FrameKey {
+            size: (canvas.width(), canvas.height()),
+            scale: env.scale,
+            maximized: env.maximized,
+            visible: env.visible,
+            active: env.active,
+        }
+    }
+
+    /// Repaints only the orb when nothing else changed since the last full frame: same input,
+    /// size, scale and focus, no worker result, no timer of the page due, and the face is
+    /// animating. Returns the changed pixels (the caller presents just that rectangle), or
+    /// `None` when a full [`frame`](Self::frame) is needed.
+    pub fn frame_orb_only(
+        &mut self,
+        canvas: &mut Canvas,
+        raw: &InputState,
+        env: &WindowEnv,
+    ) -> Option<Rect> {
+        let spot = self.orb_spot?;
+        let now = raw.time;
+        if self.mode != Mode::Setup
+            || self.last_key != Some(Self::key(canvas, env))
+            || !input_unchanged(&self.last_input, raw)
+            || self.dirty()
+            || self.setup.busy()
+            || self.next_wake.is_some_and(|t| t <= now)
+            || self.orb.next_frame(now).is_none()
+        {
+            return None;
+        }
+        self.orb
+            .set_reduce_motion(env.settings.reduce_motion || !env.active);
+        self.orb.set_visible(env.visible);
+        self.orb.set_frame_cap(orb_frame_cap(env.settings));
+        self.orb.tick(now);
+        canvas.push_clip_rect(spot.dirty);
+        canvas.fill_rect(spot.dirty, spot.background);
+        self.orb.paint(canvas, spot.rect, now);
+        canvas.pop_clip();
+        Some(spot.dirty)
     }
 
     // ---- frame ----------------------------------------------------------------------------
@@ -225,6 +349,9 @@ impl AssistantWindowView {
         env: &WindowEnv,
         out: &mut WindowOut,
     ) {
+        self.orb_spot = None;
+        self.last_key = Some(Self::key(canvas, env));
+        self.last_input = raw.clone();
         let m = Metrics::new(env.scale, 1.0);
         let m_text = Metrics::new(
             env.scale,
@@ -442,11 +569,18 @@ impl AssistantWindowView {
         self.orb
             .set_reduce_motion(env.settings.reduce_motion || !env.active);
         self.orb.set_visible(env.visible);
+        self.orb.set_frame_cap(orb_frame_cap(env.settings));
         self.orb.tick(now);
         let inner = page.inset_ltrb(m.px(24.0), m.px(16.0), m.px(24.0), m.px(12.0));
         // Header: character and title.
         let orb_rect = Rect::new(inner.x, inner.y, m.px(54.0), m.px(54.0));
         self.orb.paint(canvas, orb_rect, now);
+        // The title starts 12 units right of the orb; the margin stays clear of it.
+        self.orb_spot = orb_dirty_rect(orb_rect, m.px(8.0), page).map(|dirty| OrbSpot {
+            rect: orb_rect,
+            dirty,
+            background: pal.window,
+        });
         let title = TextStyle::new(m.font(22.0), pal.text);
         let sub = TextStyle::new(m.font(12.0), pal.dim);
         let tx = orb_rect.right() + m.px(12.0);

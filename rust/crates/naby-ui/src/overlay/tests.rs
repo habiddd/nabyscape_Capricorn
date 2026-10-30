@@ -601,6 +601,38 @@ fn clicking_the_pill_with_a_notice_opens_the_card() {
 // ---- scheduling ----------------------------------------------------------------------
 
 #[test]
+fn visited_pages_do_not_wake_the_overlay_after_navigating_away() {
+    let mut s = quiet_settings();
+    s.hover_peek = false;
+    s.widgets.retain(|w| w.id != "clock");
+    s.widgets.push(WidgetSetting::new("weather", true));
+    let mut r = Rig::new(s);
+    r.signal(Signal::Panel);
+    r.settle();
+    r.paint();
+    assert_eq!(r.overlay.active_page(), "media");
+    r.signal(Signal::ShowPage("weather"));
+    r.settle();
+    r.paint();
+    assert!(
+        r.overlay.panel.pages.contains_key("media"),
+        "media stays alive"
+    );
+    assert!(r.overlay.panel.pages.contains_key("weather"));
+    // Only the weather page is on screen: it asks for the forecast, the visited media page for nothing.
+    assert_eq!(r.overlay.panel.shown, ["weather"]);
+    let demand = r.overlay.demand(&r.snaps);
+    assert!(demand.weather);
+    assert!(!demand.lyrics && !demand.mixer);
+    r.signal(Signal::Panel);
+    r.settle();
+    r.paint();
+    assert_eq!(r.overlay.next_frame(r.snaps.now), None);
+    assert!(!r.overlay.animating());
+    assert_eq!(r.overlay.demand(&r.snaps), crate::host::Demand::default());
+}
+
+#[test]
 fn idle_closed_dock_schedules_nothing() {
     let mut s = quiet_settings();
     s.widgets.retain(|w| w.id != "clock");
