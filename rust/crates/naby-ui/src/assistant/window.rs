@@ -19,6 +19,7 @@ use super::service::AssistantService;
 use super::session::ChatSession;
 use super::setup::{SetupOut, SetupTab, SetupView};
 use super::style::{chat_theme, Metrics, Palette};
+use super::voice::{NoVoice, SpokenTurn, VoiceEnv, VoiceHost, VoiceOut, VoiceRoom};
 
 /// Caption bar height in design units (`CaptionHeight=38`).
 pub const CAPTION_HEIGHT: f32 = 38.0;
@@ -31,6 +32,8 @@ pub const BUTTON_WIDTH: f32 = 40.0;
 pub enum Mode {
     Chat,
     Setup,
+    /// The voice room (`AssistantVoiceView`).
+    Voice,
 }
 
 /// What the pointer is over, for `WM_NCHITTEST`.
@@ -109,6 +112,7 @@ pub struct AssistantWindowView {
     chat: ChatView,
     setup: SetupView,
     mode: Mode,
+    voice: VoiceRoom,
     mem: UiMemory,
     orb: Orb,
     seen_service: u64,
@@ -121,6 +125,7 @@ impl AssistantWindowView {
         Self {
             chat: ChatView::new(session.clone()),
             setup: SetupView::new(service.clone()),
+            voice: VoiceRoom::new(service.clone(), Arc::new(NoVoice)),
             service,
             session,
             mode: Mode::Chat,
@@ -154,6 +159,21 @@ impl AssistantWindowView {
         self.mem.clear();
     }
 
+    /// Connects the voice room to the host's voice runtime.
+    pub fn set_voice(&mut self, host: Arc<dyn VoiceHost>) {
+        self.voice = VoiceRoom::new(self.service.clone(), host);
+    }
+
+    /// The chat as the voice runtime sees it (shared conversation).
+    pub fn spoken_turn(&self) -> SpokenTurn {
+        SpokenTurn::new(self.session.clone())
+    }
+
+    pub fn open_voice(&mut self) {
+        self.mode = Mode::Voice;
+        self.mem.clear();
+    }
+
     pub fn open_chat(&mut self) {
         self.mode = Mode::Chat;
         self.chat.focus_composer();
@@ -162,13 +182,16 @@ impl AssistantWindowView {
 
     /// Something changed that needs a frame (a worker published, a check finished).
     pub fn dirty(&self) -> bool {
-        self.chat.dirty() || self.seen_service != self.service.revision()
+        self.chat.dirty()
+            || self.seen_service != self.service.revision()
+            || (self.mode == Mode::Voice && self.voice.dirty())
     }
 
     pub fn next_frame(&self, now: f64) -> Option<f64> {
         let chat = self.chat.next_frame(now);
         let own = match self.mode {
             Mode::Setup => self.orb.next_frame(now),
+            Mode::Voice => self.voice.next_frame(now),
             Mode::Chat => None,
         };
         [chat, own, self.next_wake]
@@ -181,6 +204,7 @@ impl AssistantWindowView {
     pub fn on_hide(&mut self) {
         self.chat.on_hide();
         self.setup.on_hide();
+        self.voice.on_hide();
         self.orb.set_visible(false);
         self.mem.clear();
         self.next_wake = None;
@@ -243,6 +267,14 @@ impl AssistantWindowView {
             Mode::Setup => {
                 self.setup_frame(canvas, fonts, &input, env, &theme, &pal, &m_text, page, out)
             }
+            Mode::Voice => {
+                self.voice_frame(canvas, fonts, &input, env, &theme, &pal, &m_text, page, out)
+            }
+        }
+        // `Command::OpenVoice` from the chat or setup pages is this window's own Voice tab.
+        if let Some(i) = out.commands.iter().position(|c| *c == Command::OpenVoice) {
+            out.commands.remove(i);
+            self.open_voice();
         }
         // The title is drawn last so the page never covers it.
         self.paint_title(canvas, fonts, &pal, &m_text, caption_h);
@@ -334,10 +366,59 @@ impl AssistantWindowView {
         let title = match self.mode {
             Mode::Chat => "NabyScape \u{b7} AI companion",
             Mode::Setup => "NabyScape \u{b7} AI setup",
+            Mode::Voice => "NabyScape \u{b7} Naby voice",
         };
         let style = TextStyle::new(m.font(12.0), pal.text).weight(Weight::Semibold);
         let y = (caption_h - fonts.line_height(&style)) / 2.0;
         canvas.text(fonts, m.px(15.0), y, title, &style, Some(m.px(420.0)));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn voice_frame(
+        &mut self,
+        canvas: &mut Canvas,
+        fonts: &Fonts,
+        raw: &InputState,
+        env: &WindowEnv,
+        theme: &Theme,
+        pal: &Palette,
+        m: &Metrics,
+        page: Rect,
+        out: &mut WindowOut,
+    ) {
+        let now = raw.time;
+        canvas.fill_rect(page, pal.window);
+        let inner = page.inset_ltrb(m.px(24.0), m.px(12.0), m.px(24.0), m.px(12.0));
+        let mut voice_out = VoiceOut::default();
+        let mut mem = std::mem::take(&mut self.mem);
+        {
+            let mut ui = Ui::new(canvas, fonts, theme, raw, &mut mem, page);
+            let voice_env = VoiceEnv {
+                now,
+                reduce_motion: env.settings.reduce_motion,
+                visible: env.visible,
+                active: env.active,
+            };
+            ui.child(inner, |ui| {
+                ui.spacing(m.px(6.0));
+                ui.scroll_area("voice", |ui| {
+                    self.voice.show(ui, &voice_env, &mut voice_out)
+                });
+            });
+        }
+        let wait = mem.repaint_after();
+        if let Some(text) = mem.take_clipboard() {
+            out.clipboard = Some(text);
+        }
+        let repaint = mem.take_repaint();
+        self.mem = mem;
+        self.next_wake = wait.map(|s| now + s).or(repaint.then_some(now));
+        out.commands.append(&mut voice_out.commands);
+        if voice_out.open_setup {
+            self.open_setup(SetupTab::Voice);
+        } else if voice_out.open_chat {
+            self.open_chat();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

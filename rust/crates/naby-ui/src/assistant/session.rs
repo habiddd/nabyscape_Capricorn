@@ -273,6 +273,40 @@ impl ChatSession {
         self.shared.revision.load(Ordering::SeqCst)
     }
 
+    // ---- voice hooks (used by `voice::turn`) ---------------------------------------------------
+
+    /// Runs `f` on the shared conversation (spoken turns and realtime transcripts).
+    pub(crate) fn with_conversation<R>(&self, f: impl FnOnce(&mut Conversation) -> R) -> R {
+        f(&mut self.shared.conversation())
+    }
+
+    pub(crate) fn tool_runner(&self) -> Arc<dyn ToolRunner> {
+        self.tools.clone()
+    }
+
+    pub(crate) fn screen_source(&self) -> Arc<dyn ScreenSource> {
+        self.screen.clone()
+    }
+
+    pub(crate) fn conversation_control(&self) -> naby_core::assistant::ConversationControl {
+        self.shared.control.clone()
+    }
+
+    /// Updates the chat model from a voice worker (phase, status, busy) and mirrors the
+    /// conversation's visible messages into the transcript.
+    pub(crate) fn voice_edit(&self, f: impl FnOnce(&mut ChatModel)) {
+        self.shared.edit(f);
+    }
+
+    pub(crate) fn mirror_conversation(&self) {
+        let old = self.shared.model().items.clone();
+        let items = {
+            let conversation = self.shared.conversation();
+            mirror(conversation.messages(), &old)
+        };
+        self.shared.edit(|m| m.items = items);
+    }
+
     pub fn media(&self) -> Arc<dyn MediaLoader> {
         self.media.clone()
     }

@@ -363,6 +363,10 @@ mod os {
     impl App {
         /// Runs the whole application and returns the process exit code.
         pub fn run() -> i32 {
+            // The private speech worker child process (never shows UI).
+            if std::env::args().nth(1).as_deref() == Some("--speech-worker") {
+                return crate::voice::worker::run();
+            }
             let raw: Vec<String> = std::env::args().skip(1).collect();
             let args = Args::parse(&raw);
             if args.widget_mcp {
@@ -984,6 +988,10 @@ mod os {
         /// and the closed-dock label. True when the dock must repaint.
         fn assistant_wake(&mut self) -> bool {
             let (commands, summary) = self.assistant.on_wake();
+            // A wake phrase was heard: open the voice room and start the conversation.
+            if self.assistant.take_voice_request() {
+                self.assistant.open_voice(&self.monitors, true);
+            }
             let mut changed = self.run_commands(commands);
             if let Some(summary) = summary {
                 changed |= self.surface.set_assistant_summary(summary);
@@ -1090,10 +1098,13 @@ mod os {
                     ShellAction::Quit => self.quit = true,
                     ShellAction::Balloon { title, detail } => self.notify(&title, &detail),
                     ShellAction::OpenAssistant => self.open_assistant(),
-                    ShellAction::OpenVoice => self.notify(
-                        "Voice",
-                        "Voice conversations are not part of this build of the new shell yet.",
-                    ),
+                    ShellAction::OpenVoice => {
+                        self.assistant.open_voice(&self.monitors, false);
+                        let changed = self.assistant_wake();
+                        if changed {
+                            self.repaint();
+                        }
+                    }
                     ShellAction::SettingsPreview(settings) => self.settings = *settings,
                     ShellAction::SettingsApplied(settings) => {
                         self.settings = *settings;

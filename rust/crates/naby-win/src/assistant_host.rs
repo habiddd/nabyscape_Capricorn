@@ -171,6 +171,7 @@ mod os {
     use crate::credentials::{AssistantKeys, SecretStore};
     use crate::event::HostEvent;
     use crate::monitors::{choose_monitor, MonitorInfo};
+    use crate::voice::{Request, VoiceBridge, VoiceRuntime};
     use crate::wake::Waker;
     use crate::widget_bridge::WidgetBridge;
     use crate::window::{
@@ -824,6 +825,8 @@ mod os {
         events: Sender<HostEvent>,
         settings: Settings,
         window: Option<OpenWindow>,
+        voice: VoiceRuntime,
+        speech_busy: bool,
         summary: AssistantSummary,
         seen_service: u64,
         _bridge: Option<WidgetBridge>,
@@ -838,6 +841,11 @@ mod os {
         ) -> Self {
             let service =
                 AssistantService::new(ServiceConfig::new(store, Arc::new(HostKeys), waker.clone()));
+            let voice = VoiceRuntime::new(
+                service.clone(),
+                &naby_core::paths::data_dir(),
+                waker.clone(),
+            );
             let queue = CommandQueue::new(waker);
             let tools = WidgetTools::new(queue.clone());
             let mut host = Self {
@@ -848,11 +856,15 @@ mod os {
                 events,
                 settings: settings.clone(),
                 window: None,
+                voice,
+                speech_busy: false,
                 summary: AssistantSummary::default(),
                 seen_service: 0,
                 _bridge: None,
             };
             host.refresh_tools();
+            // Hands-free wake listening resumes at startup only when the user enabled it.
+            host.voice.configure_wake();
             host._bridge = WidgetBridge::start(Arc::new(host.tools.clone()));
             host
         }
@@ -922,6 +934,37 @@ mod os {
         }
 
         /// Opens the window (or brings it forward) on the dock's monitor.
+        /// Opens the window in the voice room; `start` also starts the conversation (wake phrase).
+        pub fn open_voice(&mut self, monitors: &[MonitorInfo], start: bool) {
+            self.open(monitors);
+            let Some(open) = &self.window else {
+                if start {
+                    self.voice.wake_start_failed();
+                }
+                return;
+            };
+            let mut turn = None;
+            if let Ok(mut inner) = open.shared.inner.try_borrow_mut() {
+                inner.view.open_voice();
+                turn = Some(inner.view.spoken_turn());
+            }
+            open.shared.render(None);
+            match (start, turn) {
+                (true, Some(turn)) => self.voice.start(turn),
+                (true, None) => self.voice.wake_start_failed(),
+                _ => {}
+            }
+        }
+
+        /// A wake phrase asked for the voice room (drained by the app shell).
+        pub fn take_voice_request(&mut self) -> bool {
+            self.voice.take_requests().contains(&Request::OpenAndStart)
+        }
+
+        pub fn voice(&self) -> &VoiceRuntime {
+            &self.voice
+        }
+
         pub fn open(&mut self, monitors: &[MonitorInfo]) {
             if let Some(open) = &self.window {
                 let hwnd = open.shared.hwnd.get();
@@ -969,7 +1012,11 @@ mod os {
                 screen.clone(),
                 Arc::new(crate::attachment_prep::HostPreparer),
             ));
-            let view = AssistantWindowView::new(self.service.clone(), session);
+            let mut view = AssistantWindowView::new(self.service.clone(), session);
+            view.set_voice(Arc::new(VoiceBridge {
+                runtime: self.voice.clone(),
+                turn: view.spoken_turn(),
+            }));
             let shared = Rc::new(Shared {
                 tx: waker_tx,
                 started: Instant::now(),
@@ -1080,6 +1127,8 @@ mod os {
             let Some(open) = self.window.take() else {
                 return;
             };
+            // The conversation lives in this window's chat: end it (wake listening resumes).
+            self.voice.end();
             if let Ok(mut inner) = open.shared.inner.try_borrow_mut() {
                 inner.view.shutdown();
             }
@@ -1269,6 +1318,13 @@ mod os {
         /// A worker published something (reply, preview, check) or a widget tool queued a
         /// command. Returns commands for the dock and the dock summary when it changed.
         pub fn on_wake(&mut self) -> (Vec<Command>, Option<AssistantSummary>) {
+            // Speech pack work and saved voice setup feed the readiness summary.
+            let busy = self.voice.installer().busy();
+            if busy != self.speech_busy || self.seen_service != self.service.revision() {
+                self.speech_busy = busy;
+                self.service
+                    .set_speech(crate::voice::runtime::speech_service_state(&self.voice));
+            }
             if self.seen_service != self.service.revision() {
                 self.refresh_tools();
             }
@@ -1306,7 +1362,15 @@ mod os {
                 return self.summary.clone();
             }
             self.summary_key = key;
-            summary_of(&session.snapshot(), false, None)
+            let mut summary = summary_of(&session.snapshot(), false, None);
+            if self.voice.active() {
+                summary.voice_connected = true;
+                let label = self.voice.label();
+                if !label.is_empty() {
+                    summary.label = label;
+                }
+            }
+            summary
         }
 
         pub fn summary(&self) -> &AssistantSummary {
@@ -1317,6 +1381,7 @@ mod os {
     impl Drop for AssistantHost {
         fn drop(&mut self) {
             self.close();
+            self.voice.shutdown();
         }
     }
 

@@ -413,6 +413,25 @@ impl AssistantService {
         }
     }
 
+    /// Saves a change to the options (the voice settings pages use it). The edit runs on a copy
+    /// and is adopted only when it succeeds and saving works.
+    pub fn edit_options(
+        &self,
+        edit: impl FnOnce(&mut Options) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.update(edit)
+    }
+
+    /// The host reports speech component work (downloads, removal) for the readiness summary.
+    pub fn set_speech(&self, speech: SpeechService) {
+        let mut state = self.state();
+        if state.speech != speech {
+            state.speech = speech;
+            drop(state);
+            self.changed();
+        }
+    }
+
     pub fn capture_summary(&self) -> String {
         capture_summary(&self.state().capture)
     }

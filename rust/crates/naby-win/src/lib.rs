@@ -30,6 +30,7 @@ pub mod tray;
 pub mod uninstall;
 pub mod update;
 pub mod util;
+pub mod voice;
 pub mod wake;
 pub mod widget_bridge;
 pub mod window;
