@@ -23,6 +23,9 @@ pub const KEY: &str = "ListeningEngine";
 pub const SPEAKING_KEY: &str = "SpeakingEngine";
 pub const PIPER_VOICE_KEY: &str = "PiperVoice";
 pub const PIPER_SPEED_KEY: &str = "PiperSpeed";
+/// The user's own Piper voice: `PiperVoice` is [`PIPER_CUSTOM`] and this key holds the `.onnx` path.
+pub const PIPER_PATH_KEY: &str = "PiperVoicePath";
+pub const PIPER_CUSTOM: &str = "custom";
 
 /// Whether Whistle can listen in `code` (`en`, `de-DE`, ...).
 pub fn whistle_supports(code: &str) -> bool {
@@ -221,6 +224,24 @@ pub fn piper_voice(local: &LocalVoiceOptions) -> Option<&'static TtsModel> {
         .or_else(|| voices.first().copied())
 }
 
+/// "female", "male" or "" for a catalog voice, from the end of its name.
+pub fn piper_gender(m: &TtsModel) -> &'static str {
+    if m.name.ends_with(" \u{b7} female") {
+        "female"
+    } else if m.name.ends_with(" \u{b7} male") {
+        "male"
+    } else {
+        ""
+    }
+}
+
+/// The path of the user's own Piper voice when one is saved.
+pub fn piper_custom(local: &LocalVoiceOptions) -> Option<String> {
+    let custom = local.extra.get(PIPER_VOICE_KEY).and_then(Value::as_str) == Some(PIPER_CUSTOM);
+    let path = local.extra.get(PIPER_PATH_KEY).and_then(Value::as_str);
+    path.filter(|p| custom && !p.is_empty()).map(str::to_owned)
+}
+
 /// The saved Piper speed (1.0 is normal), kept inside 0.5 to 2.0.
 pub fn piper_speed(local: &LocalVoiceOptions) -> f64 {
     let speed = local.extra.get(PIPER_SPEED_KEY).and_then(Value::as_f64);
@@ -243,6 +264,13 @@ pub fn set_piper(local: &mut LocalVoiceOptions, voice: &str, speed: f64) {
     local
         .extra
         .insert(PIPER_SPEED_KEY.into(), Value::from(speed));
+}
+
+/// Stores the path of the user's own Piper voice (used when the voice is [`PIPER_CUSTOM`]).
+pub fn set_piper_path(local: &mut LocalVoiceOptions, path: &str) {
+    local
+        .extra
+        .insert(PIPER_PATH_KEY.into(), Value::String(path.into()));
 }
 
 /// Picks the listening engine and speaking engine for the saved options.
@@ -485,6 +513,46 @@ mod tests {
     }
 
     #[test]
+    fn piper_voices_carry_a_gender_and_verified_hashes() {
+        let amy = tts_models()
+            .iter()
+            .find(|m| m.id == "en_US-amy-low")
+            .unwrap();
+        assert_eq!(piper_gender(amy), "female");
+        let ryan = tts_models()
+            .iter()
+            .find(|m| m.id == "en_US-ryan-low")
+            .unwrap();
+        assert_eq!(piper_gender(ryan), "male");
+        let sharvard = tts_models()
+            .iter()
+            .find(|m| m.id == "es_ES-sharvard-medium")
+            .unwrap();
+        assert_eq!(piper_gender(sharvard), "");
+        for m in tts_models()
+            .iter()
+            .filter(|m| m.engine == "piper" && m.package.is_none() && m.id != "windows")
+        {
+            assert!(
+                [&m.hash, &m.config_hash, &m.card_hash]
+                    .iter()
+                    .all(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())),
+                "{}",
+                m.id
+            );
+            // Every voice except the two with a mixed or unconfirmed speaker names its gender.
+            if !["es_ES-sharvard-medium", "id_ID-news_tts-medium"].contains(&m.id.as_str()) {
+                assert!(!piper_gender(m).is_empty(), "{}", m.id);
+            }
+        }
+        for lang in ["en", "de", "fr", "es", "it", "pl", "ru"] {
+            let genders: Vec<_> = piper_voices(lang).into_iter().map(piper_gender).collect();
+            assert!(genders.contains(&"female") || lang == "es", "{lang}");
+            assert!(genders.contains(&"male"), "{lang}");
+        }
+    }
+
+    #[test]
     fn piper_voice_follows_the_language() {
         let mut l = local();
         l.speech_language = "es".into();
@@ -495,7 +563,7 @@ mod tests {
         assert_eq!(piper_voice(&l).unwrap().id, "en_US-amy-low");
         l.speech_language = "id".into();
         assert_eq!(piper_voice(&l).unwrap().id, "id_ID-news_tts-medium");
-        l.speech_language = "fr".into();
+        l.speech_language = "ja".into();
         assert!(piper_voice(&l).is_none());
         set_piper(&mut l, "x", 9.0);
         assert_eq!(piper_speed(&l), 2.0);
@@ -508,6 +576,13 @@ mod tests {
         assert!(json.contains("\"PiperVoice\":\"es_MX-ald-x_low\""));
         let back: LocalVoiceOptions = serde_json::from_str(&json).unwrap();
         assert_eq!(piper_speed(&back), 1.5);
+        assert_eq!(piper_custom(&back), None);
+        set_piper(&mut l, PIPER_CUSTOM, 1.0);
+        assert_eq!(piper_custom(&l), None);
+        set_piper_path(&mut l, r"C:oicesmine.onnx");
+        assert_eq!(piper_custom(&l).as_deref(), Some(r"C:oicesmine.onnx"));
+        set_piper(&mut l, "es_MX-ald-x_low", 1.0);
+        assert_eq!(piper_custom(&l), None);
     }
 
     #[test]

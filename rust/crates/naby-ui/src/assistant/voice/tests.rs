@@ -625,6 +625,33 @@ fn voice_setup_defaults_to_whistle_and_saves_other_engines() {
 }
 
 #[test]
+fn own_piper_voice_is_validated_and_saved() {
+    let Some(rig) = Rig::new(VoiceSnapshot::default()) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("mine.onnx");
+    std::fs::write(&model, b"onnx").unwrap();
+    let path = model.to_string_lossy().into_owned();
+    let mut view = VoiceSettingsView::new(rig.f.service.clone(), rig.host.clone());
+    view.set_piper_path_choice(&path);
+    // No .onnx.json next to it yet.
+    assert!(view.save_setup().is_err());
+    std::fs::write(
+        dir.path().join("mine.onnx.json"),
+        br#"{"audio":{"sample_rate":22050}}"#,
+    )
+    .unwrap();
+    view.save_setup().unwrap();
+    let local = rig.f.service.options().local_voice;
+    assert_eq!(local.extra["PiperVoice"], json!("custom"));
+    assert_eq!(super::engine::piper_custom(&local), Some(path));
+    // An empty path is refused too.
+    view.set_piper_path_choice("");
+    assert!(view.save_setup().is_err());
+}
+
+#[test]
 fn piper_control_saves_voice_and_speed_and_offers_install() {
     let Some(mut rig) = Rig::new(VoiceSnapshot::default()) else {
         return;

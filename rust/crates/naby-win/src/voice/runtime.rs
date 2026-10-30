@@ -218,6 +218,14 @@ impl VoiceRuntime {
         let speaker = match engines.speaking {
             Speaking::Realtime => "Realtime provider".to_owned(),
             Speaking::Windows => "Windows voice".to_owned(),
+            Speaking::Piper if engine::piper_custom(local).is_some() => {
+                let path = engine::piper_custom(local).unwrap_or_default();
+                let stem = std::path::Path::new(&path).file_stem();
+                format!(
+                    "Your Piper voice \u{b7} {}",
+                    stem.map_or_else(String::new, |s| s.to_string_lossy().into_owned())
+                )
+            }
             Speaking::Piper => match engine::piper_voice(local) {
                 Some(v)
                     if install::piper_ready(self.inner.installer.storage(), v)
@@ -564,6 +572,44 @@ impl VoiceRuntime {
                 Ok(Box::new(WindowsTts::new(&local.speech_language)))
             }
             Speaking::External => Ok(Box::new(HttpTts::from_options(local)?)),
+            Speaking::Piper if engine::piper_custom(local).is_some() => {
+                let path = engine::piper_custom(local).unwrap_or_default();
+                let bundle = install::bundle_dir();
+                if !install::piper_engine_ready(storage)
+                    && install::piper_engine_bundled(bundle.as_deref())
+                    && install::cpp_runtime_present()
+                    && storage.begin()
+                {
+                    status("Preparing Piper\u{2026}");
+                    let _ = install::install_piper_files(
+                        storage,
+                        None,
+                        bundle.as_deref(),
+                        &AtomicBool::new(false),
+                        &mut |_, _| {},
+                    );
+                    storage.end();
+                }
+                let own = naby_core::assistant::models::LocalVoiceOptions {
+                    own_models: true,
+                    managed: true,
+                    own_tts_engine: "Piper ONNX file".into(),
+                    own_tts_path: path.clone(),
+                    ..local.clone()
+                };
+                if install::piper_engine_ready(storage) && own_tts(&own).is_ok() {
+                    Ok(Box::new(PiperTts {
+                        exe: storage.piper_exe(),
+                        model: std::path::PathBuf::from(path),
+                        speaker: 0,
+                        length_scale: (1.0 / engine::piper_speed(local)) as f32,
+                        job: job.clone(),
+                    }))
+                } else {
+                    status("Your Piper voice is not usable (engine missing or voice file changed) \u{b7} the Windows voice speaks. Check Settings \u{2192} Voice.");
+                    Ok(Box::new(WindowsTts::new(&local.speech_language)))
+                }
+            }
             Speaking::Piper => {
                 let Some(voice) = engine::piper_voice(local) else {
                     return Ok(Box::new(WindowsTts::new(&local.speech_language)));
@@ -578,7 +624,7 @@ impl VoiceRuntime {
                     // A failure here only means the Windows voice speaks (checked below).
                     let _ = install::install_piper_files(
                         storage,
-                        voice,
+                        Some(voice),
                         bundle.as_deref(),
                         &AtomicBool::new(false),
                         &mut |_, _| {},
@@ -1396,6 +1442,13 @@ impl VoiceHost for VoiceBridge {
     }
     fn piper_status(&self, voice: &str) -> String {
         let installer = &self.runtime.inner.installer;
+        if voice == engine::PIPER_CUSTOM {
+            return if installer.busy() {
+                installer.storage().status()
+            } else {
+                install::piper_engine_status_text(installer.storage())
+            };
+        }
         match tts_by_id(voice) {
             Ok(_) if installer.busy() => installer.storage().status(),
             Ok(v) => install::piper_status_text(installer.storage(), v),
@@ -1403,6 +1456,9 @@ impl VoiceHost for VoiceBridge {
         }
     }
     fn piper_ready(&self, voice: &str) -> bool {
+        if voice == engine::PIPER_CUSTOM {
+            return install::piper_engine_ready(self.runtime.inner.installer.storage());
+        }
         tts_by_id(voice)
             .is_ok_and(|v| install::piper_ready(self.runtime.inner.installer.storage(), v))
     }

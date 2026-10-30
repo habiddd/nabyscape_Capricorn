@@ -84,6 +84,8 @@ struct SetupDraft {
     asr_protocol: usize,
     speaker: usize,
     piper_voice: String,
+    piper_gender: usize,
+    piper_path: String,
     piper_speed: f32,
     own_asr_engine: usize,
     own_tts_engine: usize,
@@ -237,7 +239,13 @@ impl VoiceSettingsView {
                     .map_or(1, |i| i + 2),
                 _ => 1,
             },
-            piper_voice: engine::piper_voice(&local).map_or_else(String::new, |m| m.id.clone()),
+            piper_voice: if engine::piper_custom(&local).is_some() {
+                engine::PIPER_CUSTOM.into()
+            } else {
+                engine::piper_voice(&local).map_or_else(String::new, |m| m.id.clone())
+            },
+            piper_gender: 0,
+            piper_path: engine::piper_custom(&local).unwrap_or_default(),
             piper_speed: engine::piper_speed(&local) as f32,
             own_asr_engine: OWN_ASR_ENGINES
                 .iter()
@@ -375,34 +383,54 @@ impl VoiceSettingsView {
         }
     }
 
-    /// The built-in Piper voice and speed for the language chosen above.
+    /// The built-in Piper voice (by gender, for the language chosen above), your own voice, and speed.
     fn piper_fields(&mut self, ui: &mut Ui<'_>) {
         let code = SPEECH_LANGUAGES[self.setup.language.min(SPEECH_LANGUAGES.len() - 1)];
-        let voices = engine::piper_voices(code);
+        let language = engine::language_label(code);
+        ui.label_dim("Piper runs on this PC and uses memory only while Naby speaks a sentence.");
+        ui.label_dim(&format!("Voices in {language}"));
+        ui.segmented(&["Any", "Female", "Male"], &mut self.setup.piper_gender);
+        let want = ["", "female", "male"][self.setup.piper_gender.min(2)];
+        let voices: Vec<_> = engine::piper_voices(code)
+            .into_iter()
+            .filter(|m| want.is_empty() || engine::piper_gender(m) == want)
+            .collect();
         if voices.is_empty() {
             ui.label_dim(&format!(
-                "No built-in Piper voice for {} yet; the Windows voice speaks.",
-                engine::language_label(code)
+                "No {want} Piper voice for {language} yet; pick your own below, or use the Windows voice."
             ));
-            return;
         }
-        ui.label_dim("Piper runs on this PC and uses memory only while Naby speaks a sentence.");
-        let labels: Vec<String> = voices
+        let mut labels: Vec<String> = voices
             .iter()
             .map(|m| format!("{} \u{b7} {:.0} MB", m.name, m.bytes as f64 / 1e6))
             .collect();
+        labels.push("My own Piper voice (.onnx)\u{2026}".into());
         let names: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let own = voices.len();
         let mut pick = voices
             .iter()
             .position(|m| m.id == self.setup.piper_voice)
-            .unwrap_or(0);
-        if ui.combo(&mut pick, &names).changed || self.setup.piper_voice.is_empty() {
-            self.setup.piper_voice = voices[pick].id.clone();
+            .unwrap_or(if self.setup.piper_voice == engine::PIPER_CUSTOM {
+                own
+            } else {
+                0
+            });
+        ui.combo(&mut pick, &names);
+        self.setup.piper_voice = if pick == own {
+            engine::PIPER_CUSTOM.into()
+        } else {
+            voices[pick].id.clone()
+        };
+        if pick == own {
+            field(ui, "Voice file (.onnx)", &mut self.setup.piper_path, 520);
+            ui.label_dim(
+                "Needs the matching .onnx.json next to it (as published with Piper voices).",
+            );
         }
         ui.section_label("Speech speed");
         ui.slider(&mut self.setup.piper_speed, 0.5..=2.0, 0.05);
         ui.label_dim(&format!("{:.2}x", self.setup.piper_speed));
-        let id = voices[pick].id.clone();
+        let id = self.setup.piper_voice.clone();
         self.piper_install(ui, &id);
     }
 
@@ -532,6 +560,24 @@ impl VoiceSettingsView {
         }
         let speaker = self.setup.speaker;
         let (piper_voice, piper_speed) = (self.setup.piper_voice.clone(), self.setup.piper_speed);
+        // Windows "Copy as path" wraps the path in quotes.
+        let piper_path = self.setup.piper_path.trim().trim_matches('"').to_owned();
+        let own_piper = speaker == 0
+            && matches!(selected, Listening::External | Listening::Whistle)
+            && piper_voice == engine::PIPER_CUSTOM;
+        if own_piper {
+            if piper_path.is_empty() {
+                return Err("Choose your Piper voice file (.onnx).".into());
+            }
+            let probe = LocalVoiceOptions {
+                own_models: true,
+                managed: true,
+                own_tts_engine: "Piper ONNX file".into(),
+                own_tts_path: piper_path.clone(),
+                ..local.clone()
+            };
+            own_tts(&probe).map_err(|e| e.message().to_owned())?;
+        }
         self.service.edit_options(|options| {
             let mut next = engine::apply_choice(options, selected);
             let target = &mut next.local_voice;
@@ -552,6 +598,9 @@ impl VoiceSettingsView {
                 engine::set_speaking(target, speaking);
                 if speaking == Speaking::Piper && !piper_voice.is_empty() {
                     engine::set_piper(target, &piper_voice, f64::from(piper_speed));
+                    if own_piper {
+                        engine::set_piper_path(target, &piper_path);
+                    }
                 }
             }
             if selected == Listening::External {
@@ -582,6 +631,12 @@ impl VoiceSettingsView {
         self.setup.speaker = 0;
         self.setup.piper_voice = voice.into();
         self.setup.piper_speed = speed;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_piper_path_choice(&mut self, path: &str) {
+        self.set_piper_choice(engine::PIPER_CUSTOM, 1.0);
+        self.setup.piper_path = path.into();
     }
 
     // ---- wake word ------------------------------------------------------------------------
@@ -741,6 +796,13 @@ impl VoiceSettingsView {
         ui.section_label("Default speaking voice");
         ui.label("Piper");
         match engine::piper_voice(&options.local_voice) {
+            _ if engine::piper_custom(&options.local_voice).is_some() => {
+                let path = engine::piper_custom(&options.local_voice).unwrap_or_default();
+                ui.label_dim(&format!(
+                    "Your Piper voice \u{b7} {path}. Runs on this PC and uses memory only while Naby speaks a sentence."
+                ));
+                self.piper_install(ui, engine::PIPER_CUSTOM);
+            }
             Some(voice) => {
                 ui.label_dim(&format!(
                     "{}. Runs on this PC and uses memory only while Naby speaks a sentence.",

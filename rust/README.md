@@ -128,7 +128,9 @@ so the notice links its source). `piper.lock` pins them like `whistle.lock`. On 
 copies and verifies them into `%LOCALAPPDATA%\NabyScape\local-speech`, so nothing is downloaded;
 without them, **Install Piper** (Voice setup > Speaking, or Models) downloads the same pinned files.
 Piper starts one `piper.exe` per sentence, so it uses memory only while Naby speaks. Voice and
-speed are set in Voice setup > Speaking. Check it with
+speed are set in Voice setup > Speaking, where voices are listed for the chosen language with a
+female/male filter (more download on Install), or **My own Piper voice (.onnx)** points at your
+own model (the matching `.onnx.json` must sit beside it; only the engine is installed for it). Check it with
 `cargo test -p naby-win --lib piper_installs_and_speaks_spanish -- --ignored --nocapture`
 (`NABY_PIPER_BUNDLE` = the folder with the shipped files, `NABY_PIPER_WAV` = a file to keep).
 

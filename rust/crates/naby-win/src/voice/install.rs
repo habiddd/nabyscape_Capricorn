@@ -426,11 +426,19 @@ pub fn bundle_dir() -> Option<PathBuf> {
         .and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
+/// The Piper engine is unpacked and verified in the speech storage (x64 only).
+pub fn piper_engine_ready(storage: &SpeechStorage) -> bool {
+    cfg!(target_arch = "x86_64") && ready(&storage.piper_folder(), Some(&storage.piper_exe()))
+}
+
 /// Piper and `voice` are unpacked and verified in the speech storage (x64 only).
 pub fn piper_ready(storage: &SpeechStorage, voice: &TtsModel) -> bool {
-    cfg!(target_arch = "x86_64")
-        && ready(&storage.piper_folder(), Some(&storage.piper_exe()))
-        && has_tts_weights(storage, voice)
+    piper_engine_ready(storage) && has_tts_weights(storage, voice)
+}
+
+/// The engine archive is shipped beside the executable.
+pub fn piper_engine_bundled(dir: Option<&Path>) -> bool {
+    dir.is_some_and(|d| d.join(PIPER_BUNDLE_ENGINE).is_file())
 }
 
 /// `dir` holds the engine archive and all three files of `voice`.
@@ -461,11 +469,12 @@ fn seed(bundle: Option<&Path>, name: &str, target: &Path) -> Result<(), Fail> {
     Ok(())
 }
 
-/// Installs the Piper engine and `voice` into the speech storage. Files shipped in `bundle` are
-/// copied and verified, so nothing is downloaded when the setup shipped them.
+/// Installs the Piper engine and `voice` (only the engine for `None`, the user's own voice) into
+/// the speech storage. Files shipped in `bundle` are copied and verified, so nothing is
+/// downloaded when the setup shipped them.
 pub fn install_piper_files(
     storage: &SpeechStorage,
-    voice: &TtsModel,
+    voice: Option<&TtsModel>,
     bundle: Option<&Path>,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&str, f64),
@@ -490,6 +499,10 @@ pub fn install_piper_files(
         cancel,
         progress,
     )?;
+    let Some(voice) = voice else {
+        fs::write(storage.root().join("SOURCES.txt"), SOURCES)?;
+        return Ok(());
+    };
     let onnx = storage.tts_path(voice);
     let files = [
         (".onnx", "", voice.bytes, &voice.hash, voice.name.as_str()),
@@ -534,6 +547,22 @@ pub fn piper_status_text(storage: &SpeechStorage, voice: &TtsModel) -> String {
         format!(
             "Not installed \u{b7} about {:.0} MB download.",
             (voice.bytes + naby_core::assistant::speech::piper_engine().bytes) as f64 / 1e6
+        )
+    }
+}
+
+/// The same line for the user's own Piper voice, which needs only the engine.
+pub fn piper_engine_status_text(storage: &SpeechStorage) -> String {
+    if !cfg!(target_arch = "x86_64") {
+        "Piper runs on x64 Windows only; the Windows voice speaks on this PC.".into()
+    } else if piper_engine_ready(storage) {
+        "Ready \u{b7} runs on this PC only while Naby speaks.".into()
+    } else if piper_engine_bundled(bundle_dir().as_deref()) {
+        "Included with NabyScape \u{b7} prepared on first use, no download.".into()
+    } else {
+        format!(
+            "Piper engine not installed \u{b7} about {:.0} MB download.",
+            naby_core::assistant::speech::piper_engine().bytes as f64 / 1e6
         )
     }
 }
@@ -924,7 +953,13 @@ pub fn install_pack(
             progress,
         )?;
     } else if tts.id != "windows" {
-        install_piper_files(storage, tts, bundle_dir().as_deref(), cancel, progress)?;
+        install_piper_files(
+            storage,
+            Some(tts),
+            bundle_dir().as_deref(),
+            cancel,
+            progress,
+        )?;
     }
     fs::write(storage.root().join("SOURCES.txt"), SOURCES)?;
     Ok(())
@@ -1345,10 +1380,12 @@ impl SpeechInstaller {
 
     /// Installs Piper and `voice_id` on a worker (offline when the setup shipped the files).
     pub fn install_piper(self: &Arc<Self>, voice_id: &str) {
-        let Ok(voice) = tts_by_id(voice_id) else {
+        // "custom" is the user's own voice: only the engine is installed.
+        let voice = tts_by_id(voice_id).ok();
+        if voice.is_none() && voice_id != "custom" {
             self.report("Choose a Piper voice.", 0.0);
             return;
-        };
+        }
         let cancel = {
             let mut s = self.state();
             if s.installing || s.scanning || !self.storage.begin() {
@@ -1588,7 +1625,7 @@ mod tests {
         let mut seen = Vec::new();
         install_piper_files(
             &storage,
-            voice,
+            Some(voice),
             bundle.as_deref(),
             &AtomicBool::new(false),
             &mut |text, _| seen.push(text.to_owned()),
@@ -1620,6 +1657,53 @@ mod tests {
         assert!(seconds > 0.5, "{seconds}");
         if let Some(path) = std::env::var_os("NABY_PIPER_WAV") {
             fs::write(path, wav_encode(24_000, &pcm)).unwrap();
+        }
+    }
+
+    /// Downloads a catalog voice (`NABY_PIPER_VOICE`, default a German female one) with the
+    /// installer, then speaks with it and with a copy of its files used as "my own voice".
+    #[test]
+    #[ignore = "downloads the engine and one voice and runs the real piper.exe"]
+    #[cfg(windows)]
+    fn piper_speaks_a_catalog_voice_and_an_own_file() {
+        use super::super::local::{Job, PiperTts};
+        use super::super::pipeline::Speaker;
+        let dir = tempfile::tempdir().unwrap();
+        let storage = SpeechStorage::new(dir.path());
+        let id = std::env::var("NABY_PIPER_VOICE").unwrap_or("de_DE-eva_k-x_low".into());
+        let voice = tts_by_id(&id).unwrap();
+        install_piper_files(
+            &storage,
+            Some(voice),
+            None,
+            &AtomicBool::new(false),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert!(piper_ready(&storage, voice));
+        let own = dir.path().join("own").join("mine.onnx");
+        fs::create_dir_all(own.parent().unwrap()).unwrap();
+        let from = storage.tts_path(voice);
+        fs::copy(&from, &own).unwrap();
+        fs::copy(
+            from.with_extension("onnx.json"),
+            own.with_extension("onnx.json"),
+        )
+        .unwrap();
+        for model in [from, own] {
+            let mut tts = PiperTts {
+                exe: storage.piper_exe(),
+                model,
+                speaker: 0,
+                length_scale: 1.0,
+                job: Arc::new(Job::new().unwrap()),
+            };
+            let pcm = tts
+                .synthesize("Hallo, ich bin Naby.", &AtomicBool::new(false))
+                .unwrap();
+            let seconds = pcm.len() as f64 / 2.0 / 24_000.0;
+            println!("{id}: spoke {seconds:.2} s ({} bytes of PCM)", pcm.len());
+            assert!(seconds > 0.5, "{seconds}");
         }
     }
 
