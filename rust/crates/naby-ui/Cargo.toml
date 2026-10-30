@@ -1,0 +1,18 @@
+[package]
+name = "naby-ui"
+description = "Platform-independent NabyScape overlay, settings and assistant views"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+naby-core.workspace = true
+naby-render.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tiny-skia.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+png.workspace = true

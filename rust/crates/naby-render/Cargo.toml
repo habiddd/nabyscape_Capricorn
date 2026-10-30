@@ -1,0 +1,13 @@
+[package]
+name = "naby-render"
+description = "CPU vector painter, text and immediate-mode widgets for NabyScape"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tiny-skia.workspace = true
+fontdue.workspace = true
+png.workspace = true
+zune-jpeg.workspace = true
+naby-core.workspace = true
