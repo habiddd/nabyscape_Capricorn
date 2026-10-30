@@ -93,7 +93,7 @@ impl Overlay {
     // ---- small queries --------------------------------------------------------------
 
     pub(crate) fn tuck_requested(&self, s: &Settings) -> bool {
-        self.tuck.requested(s, false)
+        self.tuck.requested(s, self.env_hidden)
     }
 
     pub(crate) fn interacting(&self) -> bool {
@@ -138,7 +138,7 @@ impl Overlay {
             expanded: self.expanded,
             peeking: self.peeking,
             tucked: self.tuck.is_tucked(),
-            user_hidden: self.user_hidden || self.env_hidden,
+            user_hidden: self.user_hidden,
             tuck_requested: self.tuck_requested(&snaps.settings),
             cover_pressed: false,
             interaction_active: self.interacting(),
@@ -308,7 +308,7 @@ impl Overlay {
     /// Hover peek (C# `PreviewActivity`).
     pub(crate) fn preview_activity(&mut self, snaps: &Snapshots) {
         let s = &snaps.settings;
-        let hidden = self.user_hidden || self.env_hidden;
+        let hidden = self.user_hidden;
         if snaps.notices.current.is_some()
             && !self.expanded
             && !self.peeking
@@ -368,7 +368,6 @@ impl Overlay {
         if !s.smart_activities
             || self.expanded
             || self.user_hidden
-            || self.env_hidden
             || self.tuck_requested(s)
             || (self.peeking && !self.peek.automatic)
         {
@@ -403,7 +402,7 @@ impl Overlay {
         let Some(current) = snaps.notices.current.as_ref() else {
             return;
         };
-        let hidden = self.user_hidden || self.env_hidden;
+        let hidden = self.user_hidden;
         if hidden
             || self.expanded
             || self.file_drag
@@ -450,7 +449,7 @@ impl Overlay {
         let outcome = self.tuck.set_tucked(
             &snaps.settings,
             value,
-            self.user_hidden || self.env_hidden,
+            self.user_hidden,
             &self.cfg.motion,
             self.now,
         );
@@ -475,7 +474,7 @@ impl Overlay {
         let s = &snaps.settings;
         match AutoTuckPolicy::environment(
             self.tuck_requested(s),
-            self.user_hidden || self.env_hidden,
+            self.user_hidden,
             self.expanded,
             self.peeking,
         ) {
@@ -487,7 +486,7 @@ impl Overlay {
 
     fn toggle_tuck(&mut self, snaps: &Snapshots) {
         let manual = self.tuck.toggle_manual();
-        if self.user_hidden || self.env_hidden {
+        if self.user_hidden {
             return;
         }
         self.collapse(snaps);
@@ -554,11 +553,12 @@ impl Overlay {
                 if self.env_hidden == hidden {
                     return false;
                 }
+                // C# `CheckEnvironment`: the island stays shown and tucks to its edge.
                 if hidden {
                     self.collapse(snaps);
-                    self.release_buffers();
                 }
                 self.env_hidden = hidden;
+                self.apply_environment_tuck(snaps);
             }
             Signal::OutsideClick { x, y } => {
                 if (self.expanded || self.peeking)
@@ -613,7 +613,7 @@ impl Overlay {
     // ---- input ------------------------------------------------------------------------
 
     pub(crate) fn handle_input(&mut self, input: &InputState, snaps: &Snapshots) -> bool {
-        if self.user_hidden || self.env_hidden {
+        if self.user_hidden {
             return false;
         }
         let mut changed = false;
@@ -904,7 +904,7 @@ impl Overlay {
     pub(crate) fn advance(&mut self, snaps: &Snapshots) -> bool {
         let mut changed = std::mem::take(&mut self.dirty);
         let now = snaps.now;
-        let hidden = self.user_hidden || self.env_hidden;
+        let hidden = self.user_hidden;
         if hidden {
             return changed;
         }
@@ -1015,11 +1015,8 @@ impl Overlay {
             }
         }
         // Volume / brightness feedback.
-        let allowed = !self.expanded
-            && !self.peeking
-            && !self.tuck.is_tucked()
-            && !self.user_hidden
-            && !self.env_hidden;
+        let allowed =
+            !self.expanded && !self.peeking && !self.tuck.is_tucked() && !self.user_hidden;
         changed |= self.feedback.observe(snaps, &self.cfg.motion, allowed);
         if self.feedback.visible(now) != self.feedback_was_visible {
             self.feedback_was_visible = self.feedback.visible(now);

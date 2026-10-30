@@ -389,7 +389,7 @@ impl Overlay {
 
     /// The state for hosts and tests.
     pub fn state(&self) -> OverlayState {
-        if self.user_hidden || self.env_hidden {
+        if self.user_hidden {
             OverlayState::Hidden
         } else if self.expanded {
             OverlayState::Open
@@ -511,7 +511,7 @@ impl View for Overlay {
 
     fn wants_focus(&self) -> bool {
         // The dock editing mode reads the arrow keys, Enter and Escape.
-        (self.expanded || self.dock_edit.active) && !self.user_hidden && !self.env_hidden
+        (self.expanded || self.dock_edit.active) && !self.user_hidden
     }
 
     fn interaction_active(&self) -> bool {

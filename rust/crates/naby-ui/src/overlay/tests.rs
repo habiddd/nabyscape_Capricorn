@@ -306,19 +306,37 @@ fn panel_hotkey_toggles() {
 // ---- hidden, tucked ------------------------------------------------------------------
 
 #[test]
-fn fullscreen_hides_and_restores() {
+fn fullscreen_tucks_and_restores() {
     let mut r = rig();
     r.signal(Signal::Panel);
     r.signal(Signal::EnvironmentHidden(true));
+    r.settle();
+    r.paint();
+    assert_eq!(r.state(), OverlayState::Tucked, "the island stays shown");
+    assert!(r.overlay.size(&r.snaps).0 > 0);
+    let (_, oy) = r.overlay.surface_origin(&r.snaps);
+    assert!(oy < -20.0, "slid up to the edge, got {oy}");
+    // Hovering the edge reveals the preview.
+    let (ox, _) = r.overlay.surface_origin(&r.snaps);
+    r.point(Some((ox + 100.0, 2.0)));
+    r.advance(0.05);
+    assert!(
+        matches!(r.state(), OverlayState::Hover(_)),
+        "{:?}",
+        r.state()
+    );
+    r.point(None);
+    r.advance(0.5);
+    r.settle();
+    assert_eq!(r.state(), OverlayState::Tucked);
+    // Manual hide still hides the whole island.
+    r.signal(Signal::ToggleVisibility);
     assert_eq!(r.state(), OverlayState::Hidden);
     assert_eq!(r.overlay.size(&r.snaps), (0, 0));
-    assert!(r.overlay.next_frame(r.snaps.now).is_none());
+    r.signal(Signal::ToggleVisibility);
     r.signal(Signal::EnvironmentHidden(false));
-    assert_eq!(
-        r.state(),
-        OverlayState::Closed,
-        "the open panel was closed on hide"
-    );
+    r.settle();
+    assert_eq!(r.state(), OverlayState::Closed);
     assert!(r.overlay.size(&r.snaps).0 > 0);
 }
 

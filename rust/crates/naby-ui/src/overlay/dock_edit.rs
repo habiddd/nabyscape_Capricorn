@@ -69,11 +69,7 @@ impl DockEdit {
 impl Overlay {
     /// Whether the handles are drawn and reachable.
     fn dock_handles_visible(&self) -> bool {
-        self.dock_edit.active
-            && !self.user_hidden
-            && !self.env_hidden
-            && !self.tuck.is_tucked()
-            && !self.notice_showing
+        self.dock_edit.active && !self.user_hidden && !self.tuck.is_tucked() && !self.notice_showing
     }
 
     /// Starts or ends the mode to match `Settings::dock_unlocked`.

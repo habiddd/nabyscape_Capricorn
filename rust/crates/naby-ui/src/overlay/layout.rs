@@ -19,7 +19,7 @@ pub(crate) struct Layout {
 
 impl Overlay {
     pub(crate) fn hidden(&self) -> bool {
-        self.user_hidden || self.env_hidden
+        self.user_hidden
     }
 
     pub(crate) fn layout(&self, snaps: &Snapshots) -> Layout {
