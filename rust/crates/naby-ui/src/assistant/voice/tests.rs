@@ -959,6 +959,9 @@ fn the_settings_ai_page_embeds_providers_and_the_voice_pages() {
         );
         ui.scroll_area("ai", |ui| page.frame(ui, &cx, commands));
     };
+    // A page that never showed its voice tab must not keep Settings repainting.
+    draw(&mut rig, &mut page, &mut commands);
+    assert!(!page.dirty(), "an idle AI page asks for no repaint");
     // Voice requests land on the real voice pages (Voice setup / Check audio).
     page.open(AiTarget::Voice);
     assert_eq!(page.setup().tab(), SetupTab::Voice);

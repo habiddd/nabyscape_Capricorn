@@ -128,6 +128,9 @@ pub struct VoiceSettingsView {
 
 impl VoiceSettingsView {
     pub fn new(service: AssistantService, host: Arc<dyn VoiceHost>) -> Self {
+        // Start "seen" at the current revisions: a view whose page is not shown must not keep
+        // the Settings window repainting.
+        let (seen_service, seen_voice) = (service.revision(), host.snapshot().revision);
         Self {
             service,
             host,
@@ -138,8 +141,8 @@ impl VoiceSettingsView {
                 preference: 1,
                 ..ModelsDraft::default()
             },
-            seen_service: 0,
-            seen_voice: u64::MAX,
+            seen_service,
+            seen_voice,
         }
     }
 

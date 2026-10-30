@@ -154,7 +154,7 @@ mod os {
     use crate::event::{AuxWindow, HostEvent};
     use crate::util::wide;
     use crate::window::{
-        bgra_alpha, ensure_class, map_key, rgba_to_bgra, set_user_data, user_data, wheel_pixels,
+        ensure_class, map_key, rgba_to_bgra, set_user_data, user_data, wheel_pixels,
         InputAccumulator,
     };
     use naby_core::color::Rgba;
@@ -178,10 +178,9 @@ mod os {
         DWMWA_USE_IMMERSIVE_DARK_MODE,
     };
     use windows::Win32::Graphics::Gdi::{
-        AlphaBlend, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC,
-        DeleteObject, EndPaint, GetSysColor, InvalidateRect, SelectObject, AC_SRC_ALPHA,
-        AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP,
-        HDC, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
+        BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EndPaint,
+        GetSysColor, InvalidateRect, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
     };
     use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -261,8 +260,8 @@ mod os {
         tracking: Cell<bool>,
         hand: Cell<bool>,
         resizing: Cell<bool>,
-        /// `(dc, width, height, native alpha)` of the DIB to blit; `dc == 0` before the first frame.
-        blit: Cell<(isize, u32, u32, bool)>,
+        /// `(dc, width, height)` of the DIB to blit; `dc == 0` before the first frame.
+        blit: Cell<(isize, u32, u32)>,
         started: Instant,
     }
 
@@ -289,7 +288,6 @@ mod os {
         apps: Option<Receiver<Vec<AppChoice>>>,
         store: Arc<Store>,
         info: HostInfo,
-        last_alpha: u8,
     }
 
     fn lo(l: LPARAM) -> i32 {
@@ -327,22 +325,12 @@ mod os {
                 // SAFETY: standard paint cycle on our window; the source DC outlives the call.
                 unsafe {
                     let dc = BeginPaint(hwnd, &mut ps);
-                    let (src, w, h, alpha) = s.blit.get();
+                    let (src, w, h) = s.blit.get();
                     if src != 0 && w > 0 && h > 0 {
                         let src = HDC(src as *mut c_void);
-                        if alpha {
-                            let blend = BLENDFUNCTION {
-                                BlendOp: AC_SRC_OVER as u8,
-                                BlendFlags: 0,
-                                SourceConstantAlpha: 255,
-                                AlphaFormat: AC_SRC_ALPHA as u8,
-                            };
-                            let _ = AlphaBlend(
-                                dc, 0, 0, w as i32, h as i32, src, 0, 0, w as i32, h as i32, blend,
-                            );
-                        } else {
-                            let _ = BitBlt(dc, 0, 0, w as i32, h as i32, Some(src), 0, 0, SRCCOPY);
-                        }
+                        // Copy, never blend: over a native backdrop the DIB's premultiplied alpha
+                        // must replace the last frame, or old frames ghost through it.
+                        let _ = BitBlt(dc, 0, 0, w as i32, h as i32, Some(src), 0, 0, SRCCOPY);
                     }
                     let _ = EndPaint(hwnd, &ps);
                 }
@@ -698,7 +686,7 @@ mod os {
                 tracking: Cell::new(false),
                 hand: Cell::new(false),
                 resizing: Cell::new(false),
-                blit: Cell::new((0, 0, 0, false)),
+                blit: Cell::new((0, 0, 0)),
                 started: Instant::now(),
             });
             let raw_shared = Rc::into_raw(shared.clone());
@@ -731,7 +719,6 @@ mod os {
                 apps: None,
                 store,
                 info: HostInfo::default(),
-                last_alpha: 255,
             };
             host.shared.notify();
             Some(host)
@@ -860,7 +847,7 @@ mod os {
         }
 
         fn free_dib(&mut self) {
-            self.shared.blit.set((0, 0, 0, false));
+            self.shared.blit.set((0, 0, 0));
             if let Some(d) = self.dib.take() {
                 // SAFETY: the bitmap is deselected before it is deleted.
                 unsafe {
@@ -977,10 +964,7 @@ mod os {
             // SAFETY: the DIB holds exactly w*h 32-bit pixels and stays alive during the copy.
             let dst = unsafe { std::slice::from_raw_parts_mut(dib.bits, (w * h) as usize) };
             rgba_to_bgra(self.canvas.data(), dst);
-            let native = self.info.window_alpha < 255;
-            let _ = bgra_alpha;
-            self.last_alpha = self.info.window_alpha;
-            self.shared.blit.set((self.dc.0 as isize, w, h, native));
+            self.shared.blit.set((self.dc.0 as isize, w, h));
             // SAFETY: invalidates our own window; WM_PAINT blits the DIB.
             unsafe {
                 let _ = InvalidateRect(Some(self.hwnd), None, false);
