@@ -1,4 +1,4 @@
-//! Outside-click detection while the panel or a peek is open (C# `OutsideClick`, a
+//! Outside-click detection while the dock is shown (C# `OutsideClick`, a
 //! `WH_MOUSE_LL` hook). The hook is installed only while the dock wants it and posts
 //! `HostEvent::OutsideClick` with the screen position of every left or right button press; the
 //! overlay decides whether the point is outside its contour.

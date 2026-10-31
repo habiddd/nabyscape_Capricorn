@@ -220,6 +220,8 @@ pub struct Overlay {
     // ---- visibility / modes
     pub(crate) user_hidden: bool,
     pub(crate) env_hidden: bool,
+    /// The last click landed beside the island, so it stays tucked until a click elsewhere.
+    pub(crate) near_tucked: bool,
     pub(crate) expanded: bool,
     pub(crate) peeking: bool,
     pub(crate) notice_showing: bool,
@@ -310,6 +312,7 @@ impl Overlay {
             scale: 1.0,
             user_hidden: false,
             env_hidden: false,
+            near_tucked: false,
             expanded: false,
             peeking: false,
             notice_showing: false,

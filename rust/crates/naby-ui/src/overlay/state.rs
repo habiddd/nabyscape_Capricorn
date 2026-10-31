@@ -19,6 +19,9 @@ use naby_render::{InputState, Key, Theme};
 /// How long an automatic preview (track change, timer ending) stays (`activityDismiss`).
 pub const ACTIVITY_SECONDS: f64 = 3.8;
 
+/// How close to the resting island (DIP) a click must land to tuck it.
+const NEAR_TUCK_DIP: f32 = 60.0;
+
 impl Overlay {
     // ---- configuration --------------------------------------------------------------
 
@@ -93,7 +96,19 @@ impl Overlay {
     // ---- small queries --------------------------------------------------------------
 
     pub(crate) fn tuck_requested(&self, s: &Settings) -> bool {
-        self.tuck.requested(s, self.env_hidden)
+        self.tuck.requested(s, self.env_hidden || self.near_tucked)
+    }
+
+    /// Whether a canvas point is within `NEAR_TUCK_DIP` of where the closed island rests.
+    fn near_dock(&self, origin: (f32, f32), p: (f32, f32)) -> bool {
+        let s = self.scale;
+        let (tx, ty) = self.tuck.offset();
+        let (left, top) = (origin.0 - tx as f32 * s, origin.1 - ty as f32 * s);
+        let margin = NEAR_TUCK_DIP * s;
+        p.0 >= left - margin
+            && p.0 <= left + self.surf.0 as f32 * s + margin
+            && p.1 >= top - margin
+            && p.1 <= top + self.surf.1 as f32 * s + margin
     }
 
     pub(crate) fn interacting(&self) -> bool {
@@ -561,13 +576,21 @@ impl Overlay {
                 self.apply_environment_tuck(snaps);
             }
             Signal::OutsideClick { x, y } => {
-                if (self.expanded || self.peeking)
-                    && !self.contour_contains(self.surface_origin(snaps), (x, y))
-                {
-                    self.collapse(snaps);
-                } else {
+                let origin = self.surface_origin(snaps);
+                if self.contour_contains(origin, (x, y)) {
                     return false;
                 }
+                let open = self.expanded || self.peeking;
+                // A click beside the island tucks it out of the way; one elsewhere brings it back.
+                let near = !open && self.near_dock(origin, (x, y));
+                if !open && near == self.near_tucked {
+                    return false;
+                }
+                if open {
+                    self.collapse(snaps);
+                }
+                self.near_tucked = near;
+                self.apply_environment_tuck(snaps);
             }
             Signal::FocusLost => {
                 if self.expanded || self.peeking {

@@ -354,6 +354,35 @@ fn visibility_hotkey_hides_and_shows() {
 }
 
 #[test]
+fn click_beside_the_island_tucks_and_a_click_elsewhere_restores() {
+    let mut r = rig();
+    r.settle();
+    r.paint();
+    let (cx, cy) = r.center();
+    // On the island itself: stays out.
+    r.signal(Signal::OutsideClick { x: cx, y: cy });
+    assert_eq!(r.state(), OverlayState::Closed);
+    // Just below the island: tucks, and the area it rested on keeps counting as near.
+    let (ox, oy) = r.overlay.surface_origin(&r.snaps);
+    let beside = (cx, oy + r.overlay.surf.1 as f32 * r.overlay.scale + 20.0);
+    r.signal(Signal::OutsideClick {
+        x: beside.0,
+        y: beside.1,
+    });
+    assert_eq!(r.state(), OverlayState::Tucked);
+    r.settle();
+    r.paint();
+    r.signal(Signal::OutsideClick { x: cx, y: cy });
+    assert_eq!(r.state(), OverlayState::Tucked);
+    // Far away: comes back.
+    r.signal(Signal::OutsideClick {
+        x: ox - 400.0,
+        y: 800.0,
+    });
+    assert_eq!(r.state(), OverlayState::Closed);
+}
+
+#[test]
 fn tuck_hotkey_tucks_and_hover_reveals_a_peek() {
     let mut r = rig();
     r.signal(Signal::ToggleTuck);

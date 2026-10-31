@@ -1541,10 +1541,8 @@ mod os {
         }
 
         fn wants_outside_clicks(&self) -> bool {
-            matches!(
-                self.overlay.state(),
-                OverlayState::Open | OverlayState::Hover(_) | OverlayState::Notice
-            )
+            // Also while closed or tucked: a click beside the island tucks it, one elsewhere restores it.
+            self.overlay.state() != OverlayState::Hidden
         }
 
         fn interaction_active(&self) -> bool {
