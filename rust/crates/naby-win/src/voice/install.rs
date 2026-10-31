@@ -11,7 +11,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,7 @@ use naby_core::assistant::speech::{
     KOKORO_FOLDER,
 };
 use naby_core::assistant::storage::{storage_size, SpeechStorage};
+use naby_ui::assistant::voice::engine::WhistleRuntime;
 use naby_ui::assistant::voice::{InstalledModel, SpeechPanel};
 use sha2::{Digest, Sha256};
 
@@ -364,6 +365,7 @@ pub fn download(
 /// Downloads Whistle's model and engine for `arch` from the lock `entries` into `folder`, each
 /// verified against its pinned size and SHA-256 before it appears there.
 pub fn install_whistle_files(
+    names: &[&str],
     entries: &[LockEntry],
     arch: &str,
     folder: &Path,
@@ -373,7 +375,7 @@ pub fn install_whistle_files(
 ) -> Result<(), Fail> {
     // Resolve both files first so nothing is downloaded when one cannot be installed.
     let mut wanted = Vec::new();
-    for name in [whistle::MODEL_FILE, whistle::ENGINE_FILE] {
+    for &name in names {
         let entry = entries
             .iter()
             .find(|e| e.name == name && (e.arch == arch || e.arch == "any"))
@@ -403,6 +405,126 @@ pub fn install_whistle_files(
         )?;
     }
     Ok(())
+}
+
+/// A Python 3 interpreter: `py -3`, then `python`. The Microsoft Store alias stub answers with an
+/// error instead of a version, so it is skipped.
+fn find_python(folder: &Path) -> Result<PathBuf, Fail> {
+    for (program, args) in [("py", &["-3"][..]), ("python", &[][..])] {
+        let mut command = whistle::python_command(Path::new(program), folder);
+        command.args(args).args([
+            "-c",
+            "import sys;print(sys.version_info[0], sys.executable)",
+        ]);
+        let Ok(out) = command.output() else { continue };
+        let text = String::from_utf8_lossy(&out.stdout);
+        if let (true, Some(path)) = (out.status.success(), text.trim().strip_prefix("3 ")) {
+            let path = PathBuf::from(path.trim());
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
+    }
+    Err(msg(
+        "Python 3 was not found on this PC. Install Python from python.org, or use Install with needle.exe.",
+    ))
+}
+
+/// Runs a Python step to the end (output in `log`), stopping it on cancel or after `limit`.
+fn run_python(
+    mut command: std::process::Command,
+    log: &Path,
+    what: &str,
+    cancel: &AtomicBool,
+    limit: Duration,
+) -> Result<String, Fail> {
+    let out = fs::File::create(log)?;
+    let mut child = command
+        .stdout(out.try_clone()?)
+        .stderr(out)
+        .spawn()
+        .map_err(|e| msg(format!("{what} could not start: {e}")))?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if cancel.load(Ordering::SeqCst) || started.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(if cancel.load(Ordering::SeqCst) {
+                Fail::Cancelled
+            } else {
+                msg(format!("{what} took too long and was stopped."))
+            });
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let text = fs::read_to_string(log).unwrap_or_default();
+    if !status.success() {
+        let last = text.lines().map(str::trim).rfind(|l| !l.is_empty());
+        return Err(msg(format!(
+            "{what} failed: {}",
+            last.unwrap_or("no details")
+        )));
+    }
+    Ok(text)
+}
+
+/// Installs the pip runtime of Whistle into `folder`: a virtual environment with the pinned
+/// `cactus-needle`, the verified model, the script, and the engine fetched once (its caches
+/// live in `folder` too). The script is written last, so its presence means a complete install.
+pub fn install_whistle_pip(
+    entries: &[LockEntry],
+    arch: &str,
+    folder: &Path,
+    cancel: &AtomicBool,
+    allow_http: bool,
+    progress: &mut dyn FnMut(&str, f64),
+) -> Result<(), Fail> {
+    fs::create_dir_all(folder.join("home"))?;
+    let script = folder.join(whistle::PIP_SCRIPT_FILE);
+    let _ = fs::remove_file(&script);
+    let log = folder.join("install.log");
+    let hour = Duration::from_secs(3600);
+    progress("Looking for Python\u{2026}", 2.0);
+    let python = find_python(folder)?;
+    let venv = whistle::pip_python(folder);
+    if !venv.is_file() {
+        progress("Creating the Whistle environment\u{2026}", 5.0);
+        let mut command = whistle::python_command(&python, folder);
+        command.args(["-m", "venv"]).arg(folder.join("venv"));
+        run_python(command, &log, "Creating the environment", cancel, hour)?;
+    }
+    progress("Installing cactus-needle with pip\u{2026}", 15.0);
+    let mut command = whistle::python_command(&venv, folder);
+    command.args(["-m", "pip", "install", "--no-input", whistle::PIP_PACKAGE]);
+    run_python(command, &log, "pip", cancel, hour)?;
+    let model = folder.join(whistle::MODEL_FILE);
+    install_whistle_files(
+        &[whistle::MODEL_FILE],
+        entries,
+        arch,
+        folder,
+        cancel,
+        allow_http,
+        &mut |text, value| progress(text, 40.0 + value * 0.4),
+    )?;
+    fs::write(&script, whistle::PIP_SCRIPT)?;
+    progress("Preparing the engine (downloads once)\u{2026}", 85.0);
+    let mut command = whistle::python_command(&venv, folder);
+    command.arg("-I").arg(&script).arg("--warm").arg(&model);
+    let warmed = run_python(command, &log, "Preparing the engine", cancel, hour).and_then(|text| {
+        match whistle::last_json_line(&text).map(whistle::parse_result) {
+            Some(Ok(_)) => Ok(()),
+            Some(Err(e)) => Err(msg(e)),
+            None => Err(msg("The engine did not answer.")),
+        }
+    });
+    if warmed.is_err() {
+        let _ = fs::remove_file(&script);
+    }
+    warmed
 }
 
 // ----- built-in Piper ------------------------------------------------------------------------------
@@ -1200,6 +1322,8 @@ pub struct SpeechInstaller {
     storage: Arc<SpeechStorage>,
     state: Mutex<State>,
     waker: Waker,
+    /// Counts status reports, so cached readiness is recomputed when an install ends.
+    epoch: AtomicU64,
 }
 
 impl SpeechInstaller {
@@ -1215,7 +1339,12 @@ impl SpeechInstaller {
                 cancel: Arc::new(AtomicBool::new(false)),
             }),
             waker,
+            epoch: AtomicU64::new(0),
         })
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
     }
 
     pub fn storage(&self) -> &Arc<SpeechStorage> {
@@ -1232,6 +1361,7 @@ impl SpeechInstaller {
             s.status = status.to_owned();
             s.progress = progress.clamp(0.0, 100.0);
         }
+        self.epoch.fetch_add(1, Ordering::SeqCst);
         (self.waker)();
     }
 
@@ -1330,8 +1460,13 @@ impl SpeechInstaller {
         self.storage.root().join(whistle::INSTALL_FOLDER)
     }
 
-    /// Downloads Whistle on a worker; progress shows on the Models page.
-    pub fn install_whistle(self: &Arc<Self>) {
+    /// Installs `runtime` of Whistle on a worker (progress shows on the Models page) and calls
+    /// `done` when it succeeded.
+    pub fn install_whistle(
+        self: &Arc<Self>,
+        runtime: WhistleRuntime,
+        done: Box<dyn FnOnce() + Send>,
+    ) {
         let cancel = {
             let mut s = self.state();
             if s.installing || s.scanning || !self.storage.begin() {
@@ -1341,7 +1476,7 @@ impl SpeechInstaller {
             s.cancel = Arc::new(AtomicBool::new(false));
             s.cancel.clone()
         };
-        self.report("Preparing the Whistle download\u{2026}", 0.0);
+        self.report("Preparing the Whistle install\u{2026}", 0.0);
         let me = self.clone();
         let spawned = std::thread::Builder::new()
             .name("NabyScape Whistle install".into())
@@ -1350,21 +1485,36 @@ impl SpeechInstaller {
                     .map_err(|e| msg(e.message()))
                     .and_then(|lock| {
                         let mut progress = |text: &str, value: f64| me.report(text, value);
-                        install_whistle_files(
-                            lock.entries(),
-                            whistle::current_arch(),
-                            &me.whistle_dir(),
-                            &cancel,
-                            false,
-                            &mut progress,
-                        )
+                        let (arch, entries) = (whistle::current_arch(), lock.entries());
+                        match runtime {
+                            WhistleRuntime::Exe => install_whistle_files(
+                                &[whistle::MODEL_FILE, whistle::ENGINE_FILE],
+                                entries,
+                                arch,
+                                &me.whistle_dir(),
+                                &cancel,
+                                false,
+                                &mut progress,
+                            ),
+                            WhistleRuntime::Pip => install_whistle_pip(
+                                entries,
+                                arch,
+                                &whistle::pip_dir(&me.whistle_dir()),
+                                &cancel,
+                                false,
+                                &mut progress,
+                            ),
+                        }
                     });
                 me.storage.end();
                 me.state().installing = false;
                 match result {
-                    Ok(()) => me.report("Whistle installed and verified.", 100.0),
+                    Ok(()) => {
+                        me.report("Whistle installed and verified.", 100.0);
+                        done();
+                    }
                     Err(Fail::Cancelled) => me.report(
-                        "Whistle installation cancelled. Choose Install Whistle to retry.",
+                        "Whistle installation cancelled. Choose an install button to retry.",
                         0.0,
                     ),
                     Err(Fail::Message(m)) => {
@@ -1548,19 +1698,24 @@ mod tests {
     #[test]
     #[ignore = "downloads about 18 MB from Hugging Face"]
     fn whistle_installs_from_the_embedded_lock() {
-        let dir = tempfile::tempdir().unwrap();
+        // `NABY_WHISTLE_DIR` installs for real into that folder instead of a temporary one.
+        let temp = tempfile::tempdir().unwrap();
+        let target = std::env::var_os("NABY_WHISTLE_DIR")
+            .map_or_else(|| temp.path().to_path_buf(), std::path::PathBuf::from);
+        let dir: &std::path::Path = &target;
         let lock = whistle::Lock::embedded().unwrap();
         install_whistle_files(
+            &[whistle::MODEL_FILE, whistle::ENGINE_FILE],
             lock.entries(),
             whistle::current_arch(),
-            dir.path(),
+            dir,
             &AtomicBool::new(false),
             false,
             &mut |_, _| {},
         )
         .unwrap();
         assert_eq!(
-            whistle::availability_in(dir.path(), &lock, whistle::current_arch(), false),
+            whistle::availability_in(dir, &lock, whistle::current_arch(), false),
             Ok(())
         );
     }
@@ -1716,6 +1871,7 @@ mod tests {
             whistle_entry("needle.exe", "x64", b"engine x64"),
         ];
         install_whistle_files(
+            &[whistle::MODEL_FILE, whistle::ENGINE_FILE],
             &entries,
             "x64",
             &folder,
@@ -1730,6 +1886,7 @@ mod tests {
         // No engine for the arch, an unpinned entry, or a wrong hash: refused, nothing written.
         let other = dir.path().join("other");
         let missing = install_whistle_files(
+            &[whistle::MODEL_FILE, whistle::ENGINE_FILE],
             &entries,
             "arm64",
             &other,
@@ -1741,6 +1898,7 @@ mod tests {
         let mut unpinned = whistle_entry("whistle.cact", "any", b"model");
         unpinned.sha256 = whistle::UNPINNED.into();
         let refused = install_whistle_files(
+            &[whistle::MODEL_FILE, whistle::ENGINE_FILE],
             &[unpinned],
             "x64",
             &other,
@@ -1752,6 +1910,7 @@ mod tests {
         let mut wrong = whistle_entry("whistle.cact", "any", b"model");
         wrong.sha256 = sha256_hex(b"different");
         let bad = install_whistle_files(
+            &[whistle::MODEL_FILE, whistle::ENGINE_FILE],
             &[wrong],
             "x64",
             &other,

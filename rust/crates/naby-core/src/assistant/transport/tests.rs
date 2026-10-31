@@ -1192,3 +1192,35 @@ fn ureq_executor_refuses_unreachable_and_disallowed_destinations() {
     assert!(UreqExecutor::check_destination("http://127.0.0.1:1/").is_ok());
     assert!(UreqExecutor::check_destination("not a url").is_err());
 }
+
+/// The production transport against a real local server (LM Studio, Ollama...), without a key:
+/// `NABY_CHAT_URL` (for example `http://localhost:8765/v1/`) and `NABY_CHAT_MODEL`.
+#[test]
+#[ignore = "needs a running local model server; set NABY_CHAT_URL and NABY_CHAT_MODEL"]
+fn the_real_transport_streams_a_local_reply() {
+    let provider = Provider {
+        protocol: "ChatCompletions".into(),
+        base_url: std::env::var("NABY_CHAT_URL").unwrap(),
+        model: std::env::var("NABY_CHAT_MODEL").unwrap(),
+        ..Provider::default()
+    };
+    let mut streamed = String::new();
+    let reply = Transport::ureq()
+        .with_timeout(Duration::from_secs(180))
+        .unwrap()
+        .complete_streaming(
+            &provider,
+            None,
+            &user("Responde solo: hola"),
+            &[],
+            &mut |s| {
+                streamed.push_str(s);
+                Ok(())
+            },
+            &mut |_| {},
+            &no_cancel(),
+        )
+        .unwrap();
+    println!("streamed: {streamed:?} reply: {:?}", reply.text);
+    assert!(!streamed.trim().is_empty());
+}

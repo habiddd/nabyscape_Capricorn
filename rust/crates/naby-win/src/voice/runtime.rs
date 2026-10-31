@@ -3,9 +3,10 @@
 //! the speech pack installer, and publishes [`VoiceSnapshot`]s for the views.
 //!
 //! Memory and power rules: nothing runs while voice is off except the wake listener when the user
-//! enabled hands-free. A conversation owns its capture thread, playback thread, model lease and
-//! child processes, and releases all of them when it ends. Whistle (and its DLL) unload a minute
-//! after the last conversation.
+//! enabled hands-free (Whistle when it is the listening engine and installed, else Windows speech
+//! recognition). A conversation owns its capture thread, playback thread, model lease and child
+//! processes, and releases all of them when it ends. Whistle unloads a minute after the last
+//! conversation or wake listener.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
@@ -35,6 +36,7 @@ use super::playback::Playback;
 use super::realtime::{self, Cmd, Out, Report};
 use super::wake::{self, WakeListener};
 use super::wake_logic::{WakeAction, WakeLogic};
+use super::wake_whistle::WhistleWake;
 use super::whistle::{self, Transcriber, Whistle};
 use crate::microphones;
 use crate::wake::Waker;
@@ -88,8 +90,38 @@ struct Inner {
     last_level: Mutex<Instant>,
 }
 
+/// Whichever detector listens for the wake phrase: Whistle when it is the listening engine and
+/// installed, otherwise Windows speech recognition.
+enum Detector {
+    Windows(WakeListener),
+    Whistle(WhistleWake),
+}
+
+impl Detector {
+    fn shown(&self) -> &[String] {
+        match self {
+            Self::Windows(l) => l.shown(),
+            Self::Whistle(l) => l.shown(),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Windows(_) => "Windows speech recognition",
+            Self::Whistle(_) => "Whistle",
+        }
+    }
+
+    fn stop(&mut self) {
+        match self {
+            Self::Windows(l) => l.stop(),
+            Self::Whistle(l) => l.stop(),
+        }
+    }
+}
+
 /// WinRT recognizers are free-threaded (MTA); the listener is only touched under its mutex.
-struct SendListener(WakeListener);
+struct SendListener(Detector);
 // SAFETY: `SpeechRecognizer` and its continuous session are agile (free-threaded) WinRT objects
 // created in the MTA; every call goes through the `listener` mutex.
 unsafe impl Send for SendListener {}
@@ -107,7 +139,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 impl VoiceRuntime {
     pub fn new(service: AssistantService, data_dir: &std::path::Path, waker: Waker) -> Self {
         let installer = SpeechInstaller::new(data_dir, waker.clone());
-        let whistle = Whistle::native(installer.whistle_dir());
+        let saved = service.clone();
+        let whistle = Whistle::native(installer.whistle_dir(), move || {
+            engine::whistle_runtime(&saved.options().local_voice)
+        });
         let inner = Arc::new(Inner {
             service,
             waker,
@@ -128,6 +163,26 @@ impl VoiceRuntime {
             last_level: Mutex::new(Instant::now()),
         });
         Self { inner }
+    }
+
+    /// Makes `runtime` the one Whistle runs with, installing it first when it is missing (the
+    /// switch then follows a successful install). An idle worker restarts on the new runtime.
+    pub fn use_whistle(&self, runtime: engine::WhistleRuntime) {
+        let me = self.clone();
+        let switch = move || {
+            let _ = me.inner.service.edit_options(|o: &mut Options| {
+                engine::set_whistle_runtime(&mut o.local_voice, runtime);
+                Ok(())
+            });
+            me.inner.whistle.stop_idle();
+            me.notify();
+        };
+        let installer = &self.inner.installer;
+        if whistle::availability_for(runtime, &installer.whistle_dir()).is_ok() {
+            switch();
+        } else {
+            installer.install_whistle(runtime, Box::new(switch));
+        }
     }
 
     pub fn installer(&self) -> &Arc<SpeechInstaller> {
@@ -207,7 +262,8 @@ impl VoiceRuntime {
         let ready_state = self.inner.service.setup();
         let (engine_ready, problem) = match engines.listening {
             Listening::Whistle => {
-                match whistle::availability(&self.inner.installer.whistle_dir()) {
+                let runtime = engine::whistle_runtime(local);
+                match whistle::availability_for(runtime, &self.inner.installer.whistle_dir()) {
                     Ok(()) => (true, String::new()),
                     Err(e) => (false, e.message()),
                 }
@@ -268,7 +324,8 @@ impl VoiceRuntime {
     /// The merged snapshot: live state from the conversation, settings-derived facts cached per
     /// settings revision, wake status from the state machine.
     pub fn snapshot(&self) -> Arc<VoiceSnapshot> {
-        let revision = self.inner.service.revision();
+        // Both only grow, so the sum changes with either (settings saved, install progressed).
+        let revision = self.inner.service.revision() + self.inner.installer.epoch();
         {
             let mut cached = lock(&self.inner.statics);
             if cached.0 != revision || cached.0 == 0 {
@@ -360,22 +417,30 @@ impl VoiceRuntime {
             .spawn(move || {
                 let options = me.inner.service.options();
                 let (m1, m2) = (me.clone(), me.clone());
-                let result = WakeListener::start(
-                    &options.wake_word.phrase,
-                    &options.wake_word.recognizer_id,
-                    options.wake_word.confidence,
-                    move || m1.wake_detected(),
-                    move |message| {
-                        lock(&m2.inner.wake).failed(&message);
-                        m2.release_listener();
-                        m2.notify();
-                    },
-                );
+                let detected = move || m1.wake_detected();
+                let failed = move |message: String| {
+                    lock(&m2.inner.wake).failed(&message);
+                    m2.release_listener();
+                    m2.notify();
+                };
+                let result = if me.whistle_detects(&options) {
+                    WhistleWake::start(&me.inner.whistle, &options, detected, failed)
+                        .map(Detector::Whistle)
+                } else {
+                    WakeListener::start(
+                        &options.wake_word.phrase,
+                        &options.wake_word.recognizer_id,
+                        options.wake_word.confidence,
+                        detected,
+                        failed,
+                    )
+                    .map(Detector::Windows)
+                };
                 let mut w = lock(&me.inner.wake);
                 w.set_busy(false);
                 match result {
                     Ok(listener) => {
-                        w.armed_ok();
+                        w.armed_with(listener.shown(), listener.name());
                         drop(w);
                         *lock(&me.inner.listener) = Some(SendListener(listener));
                     }
@@ -388,6 +453,14 @@ impl VoiceRuntime {
         if spawned.is_err() {
             lock(&self.inner.wake).set_busy(false);
         }
+    }
+
+    /// Whistle listens for the wake phrase when it is the listening engine and installed; nothing
+    /// installs by itself, so otherwise Windows speech recognition does.
+    pub fn whistle_detects(&self, options: &Options) -> bool {
+        let runtime = engine::whistle_runtime(&options.local_voice);
+        engine::resolve(&options.local_voice).listening == Listening::Whistle
+            && whistle::availability_for(runtime, &self.inner.installer.whistle_dir()).is_ok()
     }
 
     fn wake_detected(&self) {
@@ -1432,13 +1505,18 @@ impl VoiceHost for VoiceBridge {
         lock(&self.runtime.inner.check).clone()
     }
     fn whistle_status(&self) -> String {
-        whistle::status_text(&self.runtime.inner.installer.whistle_dir())
+        let runtime = engine::whistle_runtime(&self.runtime.inner.service.options().local_voice);
+        whistle::status_text_for(runtime, &self.runtime.inner.installer.whistle_dir())
     }
-    fn whistle_ready(&self) -> bool {
-        whistle::availability(&self.runtime.inner.installer.whistle_dir()).is_ok()
+    fn whistle_installed(&self, runtime: engine::WhistleRuntime) -> bool {
+        whistle::availability_for(runtime, &self.runtime.inner.installer.whistle_dir()).is_ok()
     }
-    fn install_whistle(&self) {
-        self.runtime.inner.installer.install_whistle();
+    fn use_whistle(&self, runtime: engine::WhistleRuntime) {
+        self.runtime.use_whistle(runtime);
+    }
+    fn whistle_detects_wake(&self) -> bool {
+        self.runtime
+            .whistle_detects(&self.runtime.inner.service.options())
     }
     fn piper_status(&self, voice: &str) -> String {
         let installer = &self.runtime.inner.installer;

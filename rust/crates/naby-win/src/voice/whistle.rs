@@ -1,6 +1,10 @@
 //! Whistle, the built-in listening model: Cactus Compute `whistle.cact` run by the Cactus
-//! Needle engine `needle.exe` (user decision 2026-10-29). Cactus publishes no Windows DLL, only
-//! `needle.exe` and a GCC static library, so each utterance runs `needle.exe --audio <wav>`.
+//! Needle engine `needle.exe` (user decision 2026-10-29). Cactus publishes no linkable Windows
+//! library (`libneedle.dll` sits inside the engine wheels but is not used here), so each
+//! utterance runs `needle.exe --audio <wav>`. The user can instead choose the `cactus-needle`
+//! Python package (`WhistleRuntime` = `Pip`): a virtual environment in
+//! `local-speech\whistle-pip`, run per utterance through `transcribe.py`. Nothing installs
+//! unless the user clicks a button in Settings > Models.
 //!
 //! * The two files sit next to `nabyscape.exe` (Setup / Portable) or in
 //!   `%LOCALAPPDATA%\NabyScape\local-speech\whistle`, where Settings > Models installs them.
@@ -8,8 +12,10 @@
 //!   embedded in the executable. A lock that still says `TO_BE_PINNED` refuses to load unless the
 //!   build has debug assertions.
 //! * One worker thread owns the engine. The thread starts when voice starts and stops 60 s after
-//!   the last voice session ended. There is no always-on Whistle loop: wake listening uses Windows
-//!   speech recognition.
+//!   the last voice session ended. While the wake word is on and Whistle is the listening engine,
+//!   [`super::wake_whistle`] holds a lease for as long as it listens, so the worker stays; Whistle
+//!   only transcribes when the energy detector hears speech. Otherwise Windows speech recognition
+//!   listens for the wake phrase.
 //!
 //! Everything except the process launch in [`native`] is platform-free and tested on Linux.
 
@@ -17,6 +23,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use naby_ui::assistant::voice::engine::WhistleRuntime;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -29,6 +36,33 @@ pub const MODEL_FILE: &str = "whistle.cact";
 pub const ENGINE_FILE: &str = "needle.exe";
 /// The folder under `local-speech` that Settings installs Whistle into.
 pub const INSTALL_FOLDER: &str = "whistle";
+/// The folder under `local-speech` of the pip runtime (a virtual environment, the model, the
+/// script and the engine caches, so removing the folder removes everything).
+pub const PIP_FOLDER: &str = "whistle-pip";
+/// The tested package version; a constant on purpose, never "latest".
+// shortcut: pip's transitive dependencies are not hash-pinned, unlike needle.exe and the model;
+// pin them with `--require-hashes` if this runtime becomes the default.
+pub const PIP_PACKAGE: &str = "cactus-needle==3.2.8";
+pub const PIP_SCRIPT_FILE: &str = "transcribe.py";
+/// Run per utterance as `python -I transcribe.py <wav> <model> <language> <keywords file> <0|1>`
+/// and, at install time, as `... --warm <model>` so the engine is fetched then, not during the
+/// first conversation. It prints one JSON line.
+pub const PIP_SCRIPT: &str = r#"import json, sys
+import needle
+
+wav, weights = sys.argv[1], sys.argv[2]
+try:
+    if wav == "--warm":
+        result = needle.transcribe([0.0] * 16000, weights=weights)
+    else:
+        language, keyword_file, words = sys.argv[3:6]
+        keywords = open(keyword_file, encoding="utf-8").read() if keyword_file else None
+        result = needle.transcribe(wav, language=language or None, keywords=keywords,
+                                   word_timestamps=words == "1", weights=weights)
+except Exception as error:
+    result = {"error": str(error)}
+print(json.dumps(result))
+"#;
 /// Whistle's input rate.
 pub const SAMPLE_RATE: u32 = 16_000;
 /// Idle time after voice ended before the engine worker stops.
@@ -242,6 +276,90 @@ pub fn status_text(install: &std::path::Path) -> String {
         Ok(()) => "Ready \u{b7} runs on this PC while a conversation is active.".into(),
         Err(e) => e.message(),
     }
+}
+
+/// Where the pip runtime lives, next to the `needle.exe` install folder.
+pub fn pip_dir(install: &std::path::Path) -> std::path::PathBuf {
+    install.with_file_name(PIP_FOLDER)
+}
+
+/// The virtual environment's interpreter.
+pub fn pip_python(folder: &std::path::Path) -> std::path::PathBuf {
+    folder.join("venv").join("Scripts").join("python.exe")
+}
+
+/// [`availability_in`] for the pip runtime: its interpreter, script (written last by the
+/// install) and model sit in `folder`, and the model is pinned.
+pub fn availability_pip_in(
+    folder: &std::path::Path,
+    lock: &Lock,
+    arch: &str,
+    allow_unpinned: bool,
+) -> Result<(), Unavailable> {
+    let entry = lock
+        .entry(MODEL_FILE, arch)
+        .ok_or_else(|| Unavailable::UnsupportedArch(arch.to_owned()))?;
+    for (name, path) in [
+        ("python.exe", pip_python(folder)),
+        (PIP_SCRIPT_FILE, folder.join(PIP_SCRIPT_FILE)),
+        (MODEL_FILE, folder.join(MODEL_FILE)),
+    ] {
+        if !path.is_file() {
+            return Err(Unavailable::Missing(name.to_owned()));
+        }
+    }
+    if !allow_unpinned && !entry.pinned() {
+        return Err(Unavailable::Unpinned);
+    }
+    Ok(())
+}
+
+/// Whether `runtime` can be used; `install` is the `needle.exe` install folder.
+pub fn availability_for(
+    runtime: WhistleRuntime,
+    install: &std::path::Path,
+) -> Result<(), Unavailable> {
+    match runtime {
+        WhistleRuntime::Exe => availability(install),
+        WhistleRuntime::Pip => availability_pip_in(
+            &pip_dir(install),
+            &Lock::embedded()?,
+            current_arch(),
+            cfg!(debug_assertions),
+        ),
+    }
+}
+
+/// [`status_text`] for the chosen runtime.
+pub fn status_text_for(runtime: WhistleRuntime, install: &std::path::Path) -> String {
+    match availability_for(runtime, install) {
+        Ok(()) => "Ready \u{b7} runs on this PC while a conversation is active.".into(),
+        Err(e) => e.message(),
+    }
+}
+
+/// A Python process for the pip runtime: no telemetry (`NEEDLE_TELEMETRY`, `DO_NOT_TRACK`), no
+/// console window, and every cache (Hugging Face, the engine's `~/.cache`) inside `folder` so
+/// uninstalling removes them.
+pub fn python_command(
+    program: &std::path::Path,
+    folder: &std::path::Path,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command
+        .env("NEEDLE_TELEMETRY", "0")
+        .env("DO_NOT_TRACK", "1")
+        .env("HF_HUB_DISABLE_TELEMETRY", "1")
+        .env("HF_HOME", folder.join("hf"))
+        .env("USERPROFILE", folder.join("home"))
+        .env("HOME", folder.join("home"))
+        .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+        .env("PYTHONUTF8", "1")
+        .current_dir(folder)
+        .stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
+    command
 }
 
 // ----- results -----------------------------------------------------------------------------
@@ -479,6 +597,8 @@ enum Job {
     },
     /// Wake the worker so it recomputes its idle deadline.
     Recheck,
+    /// Stop now when no conversation holds a lease.
+    Stop,
 }
 
 #[derive(Default)]
@@ -508,11 +628,28 @@ impl Whistle {
 
     /// The production engine (Windows: `needle.exe`; elsewhere: always unavailable). `install`
     /// is the Settings install folder (see [`locate`]).
-    pub fn native(install: std::path::PathBuf) -> Self {
+    pub fn native(
+        install: std::path::PathBuf,
+        runtime: impl Fn() -> WhistleRuntime + Send + Sync + 'static,
+    ) -> Self {
         Self::new(
-            Arc::new(move || native::backend(locate(&install))),
+            Arc::new(move || match runtime() {
+                WhistleRuntime::Exe => native::backend(locate(&install)),
+                WhistleRuntime::Pip => native::pip_backend(pip_dir(&install)),
+            }),
             IDLE_UNLOAD,
         )
+    }
+
+    /// Stops an idle worker so the next conversation starts the (possibly different) runtime;
+    /// a conversation that is running keeps the one it started with.
+    pub fn stop_idle(&self) {
+        let shared = self.lock();
+        if shared.leases == 0 {
+            if let Some(tx) = &shared.tx {
+                let _ = tx.send(Job::Stop);
+            }
+        }
     }
 
     /// Whether the worker (and so the model) is currently loaded.
@@ -637,7 +774,9 @@ fn worker(
                 let _ = reply.send(backend.stream_stop());
             }
             Ok(Job::Recheck) => {}
-            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
+            Ok(Job::Stop)
+            | Err(RecvTimeoutError::Timeout)
+            | Err(RecvTimeoutError::Disconnected) => {
                 let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.leases == 0 {
                     guard.running = false;
@@ -783,6 +922,10 @@ mod native {
     pub fn backend(_: std::path::PathBuf) -> Box<dyn Backend> {
         Box::new(Absent)
     }
+
+    pub fn pip_backend(_: std::path::PathBuf) -> Box<dyn Backend> {
+        Box::new(Absent)
+    }
 }
 
 /// A 16 kHz mono 16-bit PCM RIFF WAV of `pcm` (samples in [-1, 1], clamped), for `needle.exe`.
@@ -832,12 +975,23 @@ mod native {
     pub struct Native {
         folder: PathBuf,
         ready: bool,
+        pip: bool,
     }
 
     pub fn backend(folder: PathBuf) -> Box<dyn Backend> {
         Box::new(Native {
             folder,
             ready: false,
+            pip: false,
+        })
+    }
+
+    /// The pip runtime; `folder` is `local-speech\whistle-pip`.
+    pub fn pip_backend(folder: PathBuf) -> Box<dyn Backend> {
+        Box::new(Native {
+            folder,
+            ready: false,
+            pip: true,
         })
     }
 
@@ -876,6 +1030,12 @@ mod native {
         fn load(&mut self) -> Result<(), Unavailable> {
             let lock = Lock::embedded()?;
             let arch = current_arch();
+            if self.pip {
+                availability_pip_in(&self.folder, &lock, arch, cfg!(debug_assertions))?;
+                verify(&lock, &self.folder, MODEL_FILE, arch)?;
+                self.ready = true;
+                return Ok(());
+            }
             // Hash both files before anything is executed.
             // shortcut: not re-hashed per utterance, so a writer in the user's own profile could
             // swap needle.exe while voice is active; re-verify per call if the folder is shared.
@@ -898,62 +1058,46 @@ mod native {
             let (wav, out, err) = (scratch("wav"), scratch("out"), scratch("err"));
             let mut files = Scratch(vec![wav.clone(), out.clone(), err.clone()]);
             std::fs::write(&wav, wav_bytes(pcm)).map_err(io("write the audio"))?;
-            let mut command = Command::new(self.folder.join(ENGINE_FILE));
-            command
-                .arg("--model")
-                .arg(self.folder.join(MODEL_FILE))
-                .arg("--audio")
-                .arg(&wav);
             let language = language
                 .map(|l| l.trim().to_ascii_lowercase())
                 .map(|l| l.split(['-', '_']).next().unwrap_or("").to_owned())
                 .filter(|l| supports_language(l));
-            if let Some(language) = &language {
-                command.args(["--audio-language", language]);
-            }
-            if let Some(keywords) = keywords {
-                let list = scratch("txt");
-                files.0.push(list.clone());
-                std::fs::write(&list, keywords).map_err(io("write the keywords"))?;
-                command.arg("--audio-keywords").arg(&list);
-            }
-            if words {
-                command.arg("--audio-word-timestamps");
-            }
-            let stdout = std::fs::File::create(&out).map_err(io("start"))?;
-            let stderr = std::fs::File::create(&err).map_err(io("start"))?;
-            let mut child = command
-                .current_dir(&self.folder)
-                .stdin(Stdio::null())
-                .stdout(stdout)
-                .stderr(stderr)
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
-                .map_err(io("start"))?;
-            let started = Instant::now();
-            let status = loop {
-                match child.try_wait().map_err(io("run"))? {
-                    Some(status) => break status,
-                    None if started.elapsed() > TIMEOUT => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err("Whistle took too long and was stopped.".into());
-                    }
-                    None => std::thread::sleep(Duration::from_millis(10)),
+            let list = match keywords {
+                Some(keywords) => {
+                    let list = scratch("txt");
+                    files.0.push(list.clone());
+                    std::fs::write(&list, keywords).map_err(io("write the keywords"))?;
+                    Some(list)
                 }
+                None => None,
             };
-            let text = std::fs::read_to_string(&out).unwrap_or_default();
-            if !status.success() {
-                let detail = std::fs::read_to_string(&err).unwrap_or_default();
-                let detail = detail.lines().map(str::trim).rfind(|l| !l.is_empty());
-                return Err(match detail {
-                    Some(d) => format!("Whistle transcription failed: {d}"),
-                    None => format!("Whistle transcription failed ({status})."),
-                });
-            }
-            last_json_line(&text)
-                .map(str::to_owned)
-                .ok_or_else(|| "Whistle returned no result.".into())
+            let model = self.folder.join(MODEL_FILE);
+            let mut command = if self.pip {
+                let mut command = python_command(&pip_python(&self.folder), &self.folder);
+                command
+                    .arg("-I")
+                    .arg(self.folder.join(PIP_SCRIPT_FILE))
+                    .arg(&wav)
+                    .arg(&model)
+                    .arg(language.as_deref().unwrap_or(""))
+                    .arg(list.as_deref().unwrap_or(Path::new("")))
+                    .arg(if words { "1" } else { "0" });
+                command
+            } else {
+                let mut command = Command::new(self.folder.join(ENGINE_FILE));
+                command.arg("--model").arg(&model).arg("--audio").arg(&wav);
+                if let Some(language) = &language {
+                    command.args(["--audio-language", language]);
+                }
+                if let Some(list) = &list {
+                    command.arg("--audio-keywords").arg(list);
+                }
+                if words {
+                    command.arg("--audio-word-timestamps");
+                }
+                command
+            };
+            run(&mut command, &self.folder, &out, &err)
         }
 
         fn stream_process(
@@ -972,6 +1116,45 @@ mod native {
         fn unload(&mut self) {
             self.ready = false;
         }
+    }
+
+    /// Runs `command` in `folder` with its output in `out` and `err` (the caller deletes them),
+    /// stops it after [`TIMEOUT`], and returns the last JSON line it printed.
+    fn run(command: &mut Command, folder: &Path, out: &Path, err: &Path) -> Result<String, String> {
+        let stdout = std::fs::File::create(out).map_err(io("start"))?;
+        let stderr = std::fs::File::create(err).map_err(io("start"))?;
+        let mut child = command
+            .current_dir(folder)
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(io("start"))?;
+        let started = Instant::now();
+        let status = loop {
+            match child.try_wait().map_err(io("run"))? {
+                Some(status) => break status,
+                None if started.elapsed() > TIMEOUT => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("Whistle took too long and was stopped.".into());
+                }
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        let text = std::fs::read_to_string(out).unwrap_or_default();
+        if !status.success() {
+            let detail = std::fs::read_to_string(err).unwrap_or_default();
+            let detail = detail.lines().map(str::trim).rfind(|l| !l.is_empty());
+            return Err(match detail {
+                Some(d) => format!("Whistle transcription failed: {d}"),
+                None => format!("Whistle transcription failed ({status})."),
+            });
+        }
+        last_json_line(&text)
+            .map(str::to_owned)
+            .ok_or_else(|| "Whistle returned no result.".into())
     }
 }
 
@@ -1008,6 +1191,60 @@ mod tests {
             heard.text.to_lowercase().contains("temporizador"),
             "{}",
             heard.text
+        );
+    }
+
+    /// The pip runtime for real: installs `cactus-needle` and the model into a temporary folder
+    /// (needs Python 3 and the network), then transcribes `NABY_WHISTLE_WAV` (16 kHz mono 16-bit).
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "installs cactus-needle with pip; set NABY_WHISTLE_WAV"]
+    fn the_pip_runtime_installs_and_transcribes_a_clip() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join(PIP_FOLDER);
+        let lock = Lock::embedded().unwrap();
+        let started = std::time::Instant::now();
+        super::super::install::install_whistle_pip(
+            lock.entries(),
+            current_arch(),
+            &folder,
+            &std::sync::atomic::AtomicBool::new(false),
+            false,
+            &mut |text, value| println!("{value:>5.1}% {text}"),
+        )
+        .unwrap();
+        println!("install took {:.1} s", started.elapsed().as_secs_f64());
+        assert_eq!(
+            availability_pip_in(&folder, &lock, current_arch(), false),
+            Ok(())
+        );
+        let wav = std::fs::read(std::env::var("NABY_WHISTLE_WAV").unwrap()).unwrap();
+        let pcm: Vec<f32> = wav[44..]
+            .chunks_exact(2)
+            .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
+            .collect();
+        let whistle = Whistle::new(
+            Arc::new({
+                let folder = folder.clone();
+                move || native::pip_backend(folder.clone())
+            }),
+            Duration::from_secs(1),
+        );
+        let mut lease = whistle.acquire().unwrap();
+        let keywords = keyword_list("Hey Naby", &[]);
+        for run in 1..=2 {
+            let started = std::time::Instant::now();
+            let heard = lease.transcribe(&pcm, None, &keywords).unwrap();
+            println!(
+                "run {run}: {:.2} s {heard:?}",
+                started.elapsed().as_secs_f64()
+            );
+            assert!(!heard.text.is_empty());
+        }
+        let home = folder.join("home");
+        println!(
+            "engine cache inside the folder: {}",
+            home.join(".cache").exists()
         );
     }
 
@@ -1371,6 +1608,76 @@ mod tests {
         assert!(error.message().contains("whistle.cact"));
         assert!(!whistle.loaded());
         wait_for(|| unloads.load(Ordering::SeqCst) == 1);
+    }
+
+    #[test]
+    fn stopping_an_idle_worker_makes_the_next_session_use_the_new_runtime() {
+        let chosen = Arc::new(AtomicUsize::new(0));
+        let loads = Arc::new(AtomicUsize::new(0));
+        let (c, l) = (chosen.clone(), loads.clone());
+        let whistle = Whistle::new(
+            Arc::new(move || {
+                // The factory reads the saved runtime each time a worker starts.
+                c.fetch_add(1, Ordering::SeqCst);
+                Box::new(Fake {
+                    loads: l.clone(),
+                    unloads: Arc::default(),
+                    fail: false,
+                })
+            }),
+            Duration::from_secs(60),
+        );
+        let first = whistle.acquire().unwrap();
+        whistle.stop_idle();
+        // A running conversation keeps its engine.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(whistle.loaded());
+        drop(first);
+        whistle.stop_idle();
+        wait_for(|| !whistle.loaded());
+        drop(whistle.acquire().unwrap());
+        assert_eq!(chosen.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn python_runs_without_telemetry_and_with_caches_inside_its_folder() {
+        let folder = std::path::Path::new("whistle-pip");
+        let command = python_command(std::path::Path::new("python.exe"), folder);
+        let env: std::collections::HashMap<_, _> = command
+            .get_envs()
+            .map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned())))
+            .collect();
+        let get = |k: &str| env.get(std::ffi::OsStr::new(k)).cloned().flatten();
+        assert_eq!(get("NEEDLE_TELEMETRY").as_deref(), Some("0".as_ref()));
+        assert_eq!(get("DO_NOT_TRACK").as_deref(), Some("1".as_ref()));
+        assert_eq!(get("HF_HOME"), Some(folder.join("hf").into_os_string()));
+        assert_eq!(
+            get("USERPROFILE"),
+            Some(folder.join("home").into_os_string())
+        );
+        assert_eq!(command.get_current_dir(), Some(folder));
+    }
+
+    #[test]
+    fn the_pip_runtime_needs_its_python_script_and_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = Lock::parse(r#"[{"name":"whistle.cact","arch":"any","url":"https://x/y","bytes":1,"sha256":"TO_BE_PINNED"}]"#)
+            .unwrap();
+        let folder = dir.path().join(PIP_FOLDER);
+        assert_eq!(pip_dir(&dir.path().join("whistle")), folder);
+        let check = || availability_pip_in(&folder, &lock, "x64", true);
+        assert_eq!(check(), Err(Unavailable::Missing("python.exe".into())));
+        std::fs::create_dir_all(pip_python(&folder).parent().unwrap()).unwrap();
+        std::fs::write(pip_python(&folder), "").unwrap();
+        std::fs::write(folder.join(MODEL_FILE), "").unwrap();
+        assert_eq!(check(), Err(Unavailable::Missing(PIP_SCRIPT_FILE.into())));
+        std::fs::write(folder.join(PIP_SCRIPT_FILE), PIP_SCRIPT).unwrap();
+        assert_eq!(check(), Ok(()));
+        assert_eq!(
+            availability_pip_in(&folder, &lock, "x64", false),
+            Err(Unavailable::Unpinned)
+        );
+        assert!(PIP_PACKAGE.contains("=="), "the package version is pinned");
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! holds no memory between sentences); Windows speech, a pack voice or an external TTS are choices.
 //!
 //! The choices live in the unknown-key map of `LocalVoiceOptions` (`ListeningEngine`,
-//! `SpeakingEngine`, `PiperVoice`, `PiperSpeed`), so older
+//! `SpeakingEngine`, `PiperVoice`, `PiperSpeed`, `WhistleRuntime`), so older
 //! `assistant.json` files keep working and nothing new needs modeling in `naby-core`.
 
 use naby_core::assistant::models::{LocalVoiceOptions, Options};
@@ -26,6 +26,47 @@ pub const PIPER_SPEED_KEY: &str = "PiperSpeed";
 /// The user's own Piper voice: `PiperVoice` is [`PIPER_CUSTOM`] and this key holds the `.onnx` path.
 pub const PIPER_PATH_KEY: &str = "PiperVoicePath";
 pub const PIPER_CUSTOM: &str = "custom";
+/// The unknown-key name for how Whistle runs (`Exe` or `Pip`).
+pub const WHISTLE_RUNTIME_KEY: &str = "WhistleRuntime";
+
+/// How Whistle runs: the Cactus `needle.exe` (default) or the `cactus-needle` Python package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WhistleRuntime {
+    #[default]
+    Exe,
+    Pip,
+}
+
+impl WhistleRuntime {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Exe => "needle.exe",
+            Self::Pip => "pip",
+        }
+    }
+}
+
+/// The saved Whistle runtime; anything unknown or missing is `Exe`.
+pub fn whistle_runtime(local: &LocalVoiceOptions) -> WhistleRuntime {
+    match local.extra.get(WHISTLE_RUNTIME_KEY).and_then(Value::as_str) {
+        Some("Pip") => WhistleRuntime::Pip,
+        _ => WhistleRuntime::Exe,
+    }
+}
+
+/// Stores the Whistle runtime (`Exe` is the default, so it removes the key).
+pub fn set_whistle_runtime(local: &mut LocalVoiceOptions, runtime: WhistleRuntime) {
+    match runtime {
+        WhistleRuntime::Exe => {
+            local.extra.remove(WHISTLE_RUNTIME_KEY);
+        }
+        WhistleRuntime::Pip => {
+            local
+                .extra
+                .insert(WHISTLE_RUNTIME_KEY.into(), Value::String("Pip".into()));
+        }
+    }
+}
 
 /// Whether Whistle can listen in `code` (`en`, `de-DE`, ...).
 pub fn whistle_supports(code: &str) -> bool {
@@ -378,6 +419,8 @@ pub fn keywords(options: &Options) -> Vec<String> {
         add(word);
     }
     add("Naby");
+    add("Navi");
+    add("Oye Naby");
     add("NabyScape");
     out
 }
@@ -586,12 +629,32 @@ mod tests {
     }
 
     #[test]
+    fn whistle_runtime_defaults_to_exe_and_round_trips() {
+        use serde_json::json;
+        let mut l = local();
+        assert_eq!(whistle_runtime(&l), WhistleRuntime::Exe);
+        l.extra
+            .insert(WHISTLE_RUNTIME_KEY.into(), json!("Nonsense"));
+        assert_eq!(whistle_runtime(&l), WhistleRuntime::Exe);
+        set_whistle_runtime(&mut l, WhistleRuntime::Pip);
+        let text = serde_json::to_string(&l).unwrap();
+        assert!(text.contains("\"WhistleRuntime\":\"Pip\""));
+        let back: LocalVoiceOptions = serde_json::from_str(&text).unwrap();
+        assert_eq!(whistle_runtime(&back), WhistleRuntime::Pip);
+        set_whistle_runtime(&mut l, WhistleRuntime::Exe);
+        assert!(!serde_json::to_string(&l)
+            .unwrap()
+            .contains("WhistleRuntime"));
+    }
+
+    #[test]
     fn keywords_cover_the_wake_phrase_and_app_names() {
         let mut o = Options::default();
         o.wake_word.phrase = "Hey Naby".into();
         let k = keywords(&o);
         assert_eq!(k[0], "Hey Naby");
         assert!(k.contains(&"NabyScape".to_owned()));
+        assert!(k.contains(&"Navi".to_owned()) && k.contains(&"Oye Naby".to_owned()));
         assert_eq!(
             k.iter().filter(|w| w.eq_ignore_ascii_case("naby")).count(),
             1

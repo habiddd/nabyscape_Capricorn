@@ -110,14 +110,36 @@ CSV. Task Manager's default "Memory" column is the private working set too.
 ## How Whistle is packaged
 
 The default listening model is Cactus Compute Whistle: `whistle.cact` (model) run by the Cactus
-Needle engine `needle.exe` (per architecture). Cactus publishes no Windows DLL (only `needle.exe`
-and a GCC static library that does not link with MSVC), so each utterance is written to a temp
-WAV and transcribed by `needle.exe --model whistle.cact --audio <wav>` (about 1 s, model load
-included). Both files ship next to `nabyscape.exe` in the Setup and Portable packages; when they
-are missing (a bare exe, a development build), **Settings > Voice > Models > Install Whistle**
-downloads them to `%LOCALAPPDATA%\NabyScape\local-speech\whistle`. `whistle.lock` is a JSON array
-of `{ "name", "arch" ("any"|"x64"|"arm64"), "url", "bytes", "sha256" }`, pinned to Hugging Face
-commits; both the release script and the install button verify size and SHA-256.
+Needle engine `needle.exe` (per architecture). Cactus publishes no linkable Windows library (a
+`libneedle.dll` sits inside the engine wheels but is unused, and the GCC static library does not
+link with MSVC), so each utterance is written to a temp WAV and transcribed by
+`needle.exe --model whistle.cact --audio <wav>` (about 1 s, model load included). Both files ship
+next to `nabyscape.exe` in the Setup and Portable packages. `whistle.lock` is a JSON array of
+`{ "name", "arch" ("any"|"x64"|"arm64"), "url", "bytes", "sha256" }`, pinned to Hugging Face
+commits; both the release script and the install buttons verify size and SHA-256.
+
+Nothing installs by itself. When Whistle's files are missing (a bare exe, a development build),
+**Settings > Voice > Models** offers two buttons, and a click installs the runtime if needed and
+makes it the active one (`WhistleRuntime` in `assistant.json`, default `Exe`; switching needs no
+restart, an idle worker restarts on the new runtime):
+
+* **Install with needle.exe** (recommended, needs nothing else) downloads `needle.exe` and
+  `whistle.cact` to `%LOCALAPPDATA%\NabyScape\local-speech\whistle`.
+* **Install with pip** needs Python 3 (`py -3` or `python`; the Microsoft Store stub is
+  rejected). It creates a virtual environment in `local-speech\whistle-pip`, runs
+  `pip install cactus-needle==3.2.8`, downloads the same hash-verified `whistle.cact`, writes
+  `transcribe.py` and runs it once so the engine is fetched at install time. All caches
+  (`HF_HOME`, the engine's `~/.cache`) stay in that folder, every Python process runs with
+  `NEEDLE_TELEMETRY=0` and `DO_NOT_TRACK=1`, and each utterance runs `python -I transcribe.py`.
+  pip's transitive dependencies are not hash-pinned, unlike `needle.exe`.
+
+The wake word uses Whistle when it is the listening engine and installed, so while the wake word
+is on the microphone stays open and Whistle keeps listening (the Wake word page says so); nothing
+installs by itself, and without Whistle Windows speech recognition detects the phrase instead.
+
+Real-engine checks (ignored tests): `cargo test -p naby-win --lib the_pip_runtime_installs --
+--ignored --nocapture` with `NABY_WHISTLE_WAV` set installs the pip runtime into a temporary
+folder and transcribes the clip.
 
 ## How Piper is packaged
 
@@ -193,8 +215,11 @@ item is the biggest one.
   preview examples are static; IME composition window placement is not handled (committed text works).
 - The interactive installer uses standard dialogs instead of the WPF installer window; a rollback
   restores the exe and profile but keeps the newer Whistle files.
-- Voice: wake listening uses the Windows default microphone (Windows.Media.SpeechRecognition has no
-  input selection); live captions do not use Whistle's streaming (`needle.exe` has no per-chunk API, so the backend returns an error for streaming); realtime image sharing has
+- Voice: when Whistle is the listening engine and installed, it also detects the wake phrase: the
+  microphone stays open (the saved microphone and sensitivity apply) and Whistle runs only on
+  detected speech, one segment of up to 4 s at a time (matching is a greeting plus the name, so
+  the confidence setting does not apply). Otherwise wake listening uses Windows speech
+  recognition on the Windows default microphone (it has no input selection); live captions do not use Whistle's streaming (`needle.exe` has no per-chunk API, so the backend returns an error for streaming); realtime image sharing has
   no UI button; ARM64 native speech packs stay unavailable, as in C#.
 - Piper is x64 only (no ARM64 Windows build; ARM64 keeps the Windows voice). Only the Spanish (Latin
   America) voice ships; `es_ES-carlfm-x_low` and `en_US-amy-low` are downloads. Each sentence loads

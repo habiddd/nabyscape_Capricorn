@@ -6,6 +6,7 @@ pub mod pipeline;
 pub mod playback;
 pub mod realtime;
 pub mod wake_logic;
+pub mod wake_whistle;
 pub mod whistle;
 
 #[cfg(windows)]

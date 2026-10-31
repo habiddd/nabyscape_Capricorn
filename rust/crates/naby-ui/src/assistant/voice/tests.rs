@@ -13,6 +13,7 @@ use naby_render::snapshot::{count_differing, save, test_fonts};
 use naby_render::{Canvas, Fonts, InputState, Rect, Theme, Ui, UiMemory};
 use serde_json::json;
 
+use super::engine;
 use super::model::*;
 use super::room::{
     caption_text, detail_text, heard_text, phase_text, primary_label, privacy_text, VoiceEnv,
@@ -37,7 +38,7 @@ struct Calls {
     mic_tests: Vec<bool>,
     scans: usize,
     cancels: usize,
-    whistle_installs: usize,
+    whistle_installs: Vec<engine::WhistleRuntime>,
     piper_installs: Vec<String>,
 }
 
@@ -48,6 +49,7 @@ struct Scripted {
     mic: Mutex<MicTest>,
     calls: Mutex<Calls>,
     whistle_ready: AtomicBool,
+    whistle_wake: AtomicBool,
     piper_ready: AtomicBool,
 }
 
@@ -60,6 +62,7 @@ impl Scripted {
             mic: Mutex::default(),
             calls: Mutex::default(),
             whistle_ready: AtomicBool::new(true),
+            whistle_wake: AtomicBool::new(false),
             piper_ready: AtomicBool::new(true),
         })
     }
@@ -160,11 +163,14 @@ impl VoiceHost for Scripted {
     fn whistle_status(&self) -> String {
         "Ready \u{b7} loads when a conversation starts.".into()
     }
-    fn whistle_ready(&self) -> bool {
+    fn whistle_installed(&self, _: engine::WhistleRuntime) -> bool {
         self.whistle_ready.load(Ordering::SeqCst)
     }
-    fn install_whistle(&self) {
-        self.calls.lock().unwrap().whistle_installs += 1;
+    fn whistle_detects_wake(&self) -> bool {
+        self.whistle_wake.load(Ordering::SeqCst)
+    }
+    fn use_whistle(&self, runtime: engine::WhistleRuntime) {
+        self.calls.lock().unwrap().whistle_installs.push(runtime);
     }
     fn piper_status(&self, _: &str) -> String {
         if self.piper_ready("") {
@@ -698,8 +704,27 @@ fn wake_page_saves_through_the_core_rules_and_arms_the_host() {
     view.open(VoicePage::Wake);
     rig.settings_frame(&mut view, InputState::default());
     save("voice-settings-wake", &rig.canvas);
-    // Enabling without a voice connection explains what is missing.
+    // Enabling shows what keeps listening: Windows (and how to switch) or Whistle.
     view.set_wake_enabled(true);
+    rig.host.whistle_ready.store(false, Ordering::SeqCst);
+    rig.settings_frame(&mut view, InputState::default());
+    save("voice-settings-wake", &rig.canvas);
+    let windows = super::settings::wake_notice("Hey Naby", false, true);
+    assert!(windows.contains("Windows speech recognition keeps listening"));
+    assert!(windows.contains("installing it from Models switches detection to Whistle"));
+    assert!(!super::settings::wake_notice("Hey Naby", false, false).contains("Models"));
+    rig.host.whistle_wake.store(true, Ordering::SeqCst);
+    rig.settings_frame(&mut view, InputState::default());
+    save("voice-settings-wake-whistle", &rig.canvas);
+    let whistle = super::settings::wake_notice("Hey Naby", true, false);
+    assert!(whistle.contains("Whistle keeps listening"));
+    assert!(whistle.contains("\u{201c}Hey Naby\u{201d} or \u{201c}Oye Naby\u{201d}"));
+    assert!(whistle.contains("only runs when it hears speech"));
+    assert!(super::settings::wake_notice("Okay Computer", true, false)
+        .contains("\u{201c}Okay Computer\u{201d} and"));
+    rig.host.whistle_wake.store(false, Ordering::SeqCst);
+    rig.host.whistle_ready.store(true, Ordering::SeqCst);
+    // Enabling without a voice connection explains what is missing.
     let err = view.save_wake().unwrap_err();
     assert!(
         err.contains("working voice connection") || err.contains("Enable AI companion"),

@@ -22,6 +22,27 @@ use super::room::mic_test_line;
 use crate::assistant::providers::{field, pill};
 use crate::assistant::service::AssistantService;
 
+/// What the Wake word page tells the user while the wake word is on: the microphone stays open
+/// and which detector keeps listening (`by_whistle`), and how to switch to Whistle when it is
+/// the chosen engine but not installed (`missing`).
+pub(crate) fn wake_notice(phrase: &str, by_whistle: bool, missing: bool) -> String {
+    let phrases = if phrase.eq_ignore_ascii_case(naby_core::assistant::voice::DEFAULT_WAKE_PHRASE) {
+        "\u{201c}Hey Naby\u{201d} or \u{201c}Oye Naby\u{201d}".to_owned()
+    } else {
+        format!("\u{201c}{phrase}\u{201d}")
+    };
+    if by_whistle {
+        format!("While the wake word is on, the microphone stays open and Whistle keeps listening so it can detect {phrases} and start the chat. Whistle only runs when it hears speech. Everything stays on this PC.")
+    } else {
+        let hint = if missing {
+            " Whistle is not installed; installing it from Models switches detection to Whistle."
+        } else {
+            ""
+        };
+        format!("While the wake word is on, the microphone stays open and Windows speech recognition keeps listening so it can detect {phrases} and start the chat. Everything stays on this PC.{hint}")
+    }
+}
+
 /// The sub-pages (`Setup`, `Wake`, `Models`, `Audio`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VoicePage {
@@ -670,7 +691,7 @@ impl VoiceSettingsView {
         self.seed_wake();
         let snap = self.host.snapshot();
         ui.heading_sized("Wake Naby with your voice", 20.0);
-        ui.label_dim("Choose a phrase and turn hands-free listening on or off. Detection uses an installed Windows speech recognizer, separately from your listening and speaking models. Wake audio never leaves this PC.");
+        ui.label_dim("Choose a phrase and turn hands-free listening on or off. Wake audio never leaves this PC.");
         let mut enabled = self.wake.wake.enabled;
         if ui
             .toggle(&mut enabled, "Enable wake word on this PC")
@@ -678,7 +699,17 @@ impl VoiceSettingsView {
         {
             self.wake.wake.enabled = enabled;
         }
+        if self.wake.wake.enabled {
+            let options = self.service.options();
+            let by_whistle = self.host.whistle_detects_wake();
+            let missing = engine::resolve(&options.local_voice).listening == Listening::Whistle
+                && !self
+                    .host
+                    .whistle_installed(engine::whistle_runtime(&options.local_voice));
+            ui.label_dim(&wake_notice(&self.wake.wake.phrase, by_whistle, missing));
+        }
         field(ui, "Wake phrase", &mut self.wake.wake.phrase, 64);
+        let by_whistle = self.host.whistle_detects_wake();
         ui.section_label("Windows recognition language");
         let mut names: Vec<String> = vec!["Automatic \u{b7} prefer English".into()];
         names.extend(self.wake.recognizers.iter().map(|(_, n)| n.clone()));
@@ -690,11 +721,15 @@ impl VoiceSettingsView {
         if self.wake.recognizers.is_empty() {
             ui.label_dim("Windows speech recognizers could not be listed. Check installed speech languages and microphone permissions.");
         }
-        ui.section_label(&format!(
-            "Confidence threshold \u{b7} {}%",
-            (self.wake.confidence * 100.0).round() as i32
-        ));
-        ui.slider(&mut self.wake.confidence, 0.55..=0.95, 0.01);
+        if by_whistle {
+            ui.label_dim("The language and confidence threshold apply to Windows speech recognition only; Whistle detects the phrase in any language it knows.");
+        } else {
+            ui.section_label(&format!(
+                "Confidence threshold \u{b7} {}%",
+                (self.wake.confidence * 100.0).round() as i32
+            ));
+            ui.slider(&mut self.wake.confidence, 0.55..=0.95, 0.01);
+        }
         ui.row(|ui| {
             ui.spacing(6.0);
             if ui.button("Refresh recognizers").clicked {
@@ -730,7 +765,7 @@ impl VoiceSettingsView {
         if !status.is_empty() {
             ui.label_dim(&status);
         }
-        ui.label_dim("The default phrase also accepts close pronunciations. This is phrase recognition, not speaker verification. Enabled recognition uses additional Windows resources.");
+        ui.label_dim("The default phrase also accepts close pronunciations. This is phrase recognition, not speaker verification.");
     }
 
     #[cfg(test)]
@@ -787,13 +822,32 @@ impl VoiceSettingsView {
             engine::whistle_language_names()
         ));
         ui.label_dim(&self.host.whistle_status());
-        if !self.host.whistle_ready()
-            && ui
-                .enabled(!panel.busy, |ui| ui.button("Install Whistle"))
-                .clicked
-        {
-            self.host.install_whistle();
-        }
+        let active = engine::whistle_runtime(&options.local_voice);
+        ui.label_dim(&format!(
+            "Runs with {}. needle.exe is recommended and needs nothing else; pip needs Python on this PC.",
+            active.label()
+        ));
+        ui.row(|ui| {
+            ui.spacing(6.0);
+            ui.enabled(!panel.busy, |ui| {
+                for runtime in [engine::WhistleRuntime::Exe, engine::WhistleRuntime::Pip] {
+                    let verb = if self.host.whistle_installed(runtime) {
+                        "Use"
+                    } else {
+                        "Install with"
+                    };
+                    let label = &format!("{verb} {}", runtime.label());
+                    let clicked = if runtime == active {
+                        ui.primary_button(label).clicked
+                    } else {
+                        ui.button(label).clicked
+                    };
+                    if clicked {
+                        self.host.use_whistle(runtime);
+                    }
+                }
+            });
+        });
 
         // Piper: the default speaking voice, shipped beside the app.
         ui.section_label("Default speaking voice");

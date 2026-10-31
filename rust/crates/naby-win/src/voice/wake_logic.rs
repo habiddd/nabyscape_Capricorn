@@ -101,11 +101,18 @@ impl WakeLogic {
     }
 
     /// The host opened the wake microphone.
+    #[cfg(test)]
     pub fn armed_ok(&mut self) {
+        let phrase = self.phrase.clone();
+        self.armed_with(&[phrase], "Windows speech recognition");
+    }
+
+    /// Same, naming the detector and every phrase it listens for.
+    pub fn armed_with(&mut self, phrases: &[String], detector: &str) {
         self.listening = true;
         self.status = format!(
-            "Wake microphone on \u{b7} say \u{201c}{}\u{201d}. Detection stays on this PC.",
-            self.phrase
+            "Wake microphone on \u{b7} {detector} is listening \u{b7} say \u{201c}{}\u{201d}. Detection stays on this PC.",
+            phrases.join("\u{201d} or \u{201c}")
         );
     }
 

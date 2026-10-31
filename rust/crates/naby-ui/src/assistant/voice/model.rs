@@ -172,10 +172,13 @@ pub trait VoiceHost: Send + Sync {
     fn audio_check(&self) -> AudioCheck;
     /// Short Whistle status for the Models page ("Ready · built in" or the reason).
     fn whistle_status(&self) -> String;
-    /// Whether Whistle's files are in place (the Models page offers Install otherwise).
-    fn whistle_ready(&self) -> bool;
-    /// Download and verify Whistle; progress is reported through [`SpeechPanel`].
-    fn install_whistle(&self);
+    /// Whether `runtime`'s files are in place.
+    fn whistle_installed(&self, runtime: super::engine::WhistleRuntime) -> bool;
+    /// Whether Whistle (not Windows speech recognition) is what listens for the wake phrase.
+    fn whistle_detects_wake(&self) -> bool;
+    /// Makes `runtime` the active one, installing it first when it is missing; progress is
+    /// reported through [`SpeechPanel`] and the runtime switches once the install succeeded.
+    fn use_whistle(&self, runtime: super::engine::WhistleRuntime);
     /// Short status of the built-in Piper voice `voice` ("Ready", "Not installed", ...).
     fn piper_status(&self, voice: &str) -> String;
     /// Whether Piper and `voice` are unpacked and verified.
@@ -227,10 +230,13 @@ impl VoiceHost for NoVoice {
     fn whistle_status(&self) -> String {
         "Unavailable".into()
     }
-    fn whistle_ready(&self) -> bool {
+    fn whistle_installed(&self, _: super::engine::WhistleRuntime) -> bool {
         false
     }
-    fn install_whistle(&self) {}
+    fn use_whistle(&self, _: super::engine::WhistleRuntime) {}
+    fn whistle_detects_wake(&self) -> bool {
+        false
+    }
     fn piper_status(&self, _: &str) -> String {
         "Unavailable".into()
     }

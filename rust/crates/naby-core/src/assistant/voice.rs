@@ -625,18 +625,109 @@ pub fn wake_phrase(value: &str) -> Result<String> {
     Ok(phrase)
 }
 
-/// The phrases the recognizer grammar accepts (the default phrase also takes common mishearings).
-pub fn wake_grammar(phrase: &str) -> Vec<String> {
-    if phrase.eq_ignore_ascii_case(DEFAULT_WAKE_PHRASE) {
-        vec![
-            phrase.to_string(),
-            "Hey Nabi".into(),
-            "Hey Nabby".into(),
-            "Hey Navy".into(),
-        ]
-    } else {
-        vec![phrase.to_string()]
+const WAKE_EN: [&str; 5] = ["Hey Naby", "Hey Nabi", "Hey Nabby", "Hey Navy", "Hey Navi"];
+const WAKE_ES: [&str; 4] = ["Oye Naby", "Oye Navi", "Hola Naby", "Hola Navi"];
+
+/// Which recognizers listen and for what: `(language tag, phrases)` per recognizer, empty when no
+/// installed language fits. The default phrase with automatic language listens in English and
+/// Spanish (each when installed, `es-MX`/`en-GB` count, `en-US`/`es-ES` preferred) and also takes
+/// common mishearings; anything else is a single recognizer for `phrase`.
+pub fn wake_plan(phrase: &str, saved_id: &str, available: &[String]) -> Vec<(String, Vec<String>)> {
+    let grammar = |tag: &str| -> Vec<String> {
+        let list: &[&str] = if tag.to_ascii_lowercase().starts_with("es") {
+            &WAKE_ES
+        } else {
+            &WAKE_EN
+        };
+        list.iter().map(|s| s.to_string()).collect()
+    };
+    let default = phrase.eq_ignore_ascii_case(DEFAULT_WAKE_PHRASE);
+    if !saved_id.is_empty() {
+        return available
+            .iter()
+            .find(|t| *t == saved_id)
+            .map(|t| {
+                vec![(
+                    t.clone(),
+                    if default {
+                        grammar(t)
+                    } else {
+                        vec![phrase.into()]
+                    },
+                )]
+            })
+            .unwrap_or_default();
     }
+    let best = |base: &str, preferred: &str| {
+        let mut same = available.iter().filter(|t| {
+            t.split('-')
+                .next()
+                .is_some_and(|b| b.eq_ignore_ascii_case(base))
+        });
+        let first = same.clone().next();
+        same.find(|t| t.eq_ignore_ascii_case(preferred)).or(first)
+    };
+    if default {
+        let both: Vec<_> = [best("en", "en-US"), best("es", "es-ES")]
+            .into_iter()
+            .flatten()
+            .map(|t| (t.clone(), grammar(t)))
+            .collect();
+        if !both.is_empty() {
+            return both;
+        }
+    }
+    best("en", "en-US")
+        .or(available.first())
+        .map(|t| {
+            vec![(
+                t.clone(),
+                if default {
+                    grammar(t)
+                } else {
+                    vec![phrase.into()]
+                },
+            )]
+        })
+        .unwrap_or_default()
+}
+
+/// Lowercase words of `text` without accents or punctuation (`¿Qué hora es?` is `que hora es`).
+fn wake_words(text: &str) -> Vec<String> {
+    let folded: String = text
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ä' | 'ã' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'ö' | 'õ' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            'ñ' => 'n',
+            c if c.is_alphanumeric() => c,
+            _ => ' ',
+        })
+        .collect();
+    folded.split_whitespace().map(str::to_owned).collect()
+}
+
+/// Whether a transcript (Whistle's) contains the wake phrase. The default phrase is a greeting
+/// (hey, ey, oye, hola) immediately followed by the name (naby, navi, nabi, nabby, navy)
+/// anywhere in the text, so "navy" alone or "hey" alone never wakes; a custom phrase must appear
+/// on word boundaries.
+pub fn wake_heard(phrase: &str, transcript: &str) -> bool {
+    let heard = wake_words(transcript);
+    if phrase.eq_ignore_ascii_case(DEFAULT_WAKE_PHRASE) {
+        return heard.windows(2).any(|w| {
+            matches!(
+                w[0].as_str(),
+                "hey" | "ey" | "oye" | "hola" | "hay" | "ollie" // how Whistle mishears "hey" and "oye"
+            )
+                && matches!(w[1].as_str(), "naby" | "navi" | "nabi" | "nabby" | "navy")
+        });
+    }
+    let wanted = wake_words(phrase);
+    !wanted.is_empty() && heard.windows(wanted.len()).any(|w| w == wanted)
 }
 
 /// Confidence needed to activate, clamped to 55 to 95 percent.
@@ -1012,11 +1103,68 @@ mod tests {
         for bad in ["hi", "", "a1b2c", "Hey! Naby", &"a".repeat(65)] {
             assert!(wake_phrase(bad).is_err(), "{bad}");
         }
-        assert_eq!(wake_grammar("hey naby").len(), 4);
-        assert_eq!(wake_grammar("Okay Computer"), ["Okay Computer"]);
         assert_eq!(wake_threshold(0.1), 0.55);
         assert_eq!(wake_threshold(2.0), 0.95);
         assert_eq!(wake_threshold(f64::NAN), 0.72);
+    }
+
+    #[test]
+    fn wake_heard_needs_a_greeting_followed_by_the_name() {
+        for yes in [
+            "Oye, Navi, ¿qué hora es?",
+            "Hey, Navi, what time is it?",
+            "hola naby",
+            "so, Hey Nabby start",
+            "Ey Naví",
+        ] {
+            assert!(wake_heard("Hey Naby", yes), "{yes}");
+        }
+        for no in ["navy", "la armada navy", "hey", "hey there", "naby hey", ""] {
+            assert!(!wake_heard("Hey Naby", no), "{no}");
+        }
+        assert!(wake_heard("Hey Naby", "Hay Navi."));
+        assert!(wake_heard("Hey Naby", "Ollie Navi, who a copyright"));
+        assert!(wake_heard("Okay Computer", "well, okay computer, listen"));
+        assert!(!wake_heard("Okay Computer", "okay computers"));
+        assert!(wake_heard("Hola Ñandú", "HOLA, ñandu!"));
+    }
+
+    #[test]
+    fn wake_plan_listens_in_both_languages_by_default() {
+        let tags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let langs = |p: Vec<(String, Vec<String>)>| p.into_iter().map(|x| x.0).collect::<Vec<_>>();
+        let both = wake_plan("hey naby", "", &tags(&["en-GB", "es-MX", "es-ES", "en-US"]));
+        assert_eq!(both[0].0, "en-US");
+        assert_eq!(both[1].0, "es-ES");
+        assert_eq!(both[0].1.len(), 5);
+        assert!(both[1].1.contains(&"Oye Navi".to_owned()));
+        assert_eq!(
+            langs(wake_plan("Hey Naby", "", &tags(&["es-MX", "en-GB"]))),
+            ["en-GB", "es-MX"]
+        );
+        assert_eq!(
+            langs(wake_plan("Hey Naby", "", &tags(&["es-MX", "de-DE"]))),
+            ["es-MX"]
+        );
+        // Neither installed: first available, English grammar.
+        let other = wake_plan("Hey Naby", "", &tags(&["de-DE", "fr-FR"]));
+        assert_eq!((other[0].0.as_str(), other[0].1.len()), ("de-DE", 5));
+        assert!(wake_plan("Hey Naby", "", &[]).is_empty());
+    }
+
+    #[test]
+    fn wake_plan_keeps_single_recognizer_for_saved_id_or_custom_phrase() {
+        let tags = ["en-US".to_owned(), "es-ES".to_owned()];
+        let es = wake_plan("Hey Naby", "es-ES", &tags);
+        assert_eq!((es.len(), es[0].1[0].as_str()), (1, "Oye Naby"));
+        let en = wake_plan("Hey Naby", "en-US", &tags);
+        assert_eq!((en.len(), en[0].1[0].as_str()), (1, "Hey Naby"));
+        assert!(wake_plan("Hey Naby", "fr-FR", &tags).is_empty());
+        assert_eq!(
+            wake_plan("Okay Computer", "", &tags),
+            [("en-US".to_owned(), vec!["Okay Computer".to_owned()])]
+        );
+        assert_eq!(wake_plan("Okay Computer", "es-ES", &tags)[0].0, "es-ES");
     }
 
     #[test]
