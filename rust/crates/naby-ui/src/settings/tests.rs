@@ -152,6 +152,15 @@ fn searching_finds_a_setting_by_label_and_opens_its_page() {
 }
 
 #[test]
+fn search_keeps_focus_while_typing_one_key_per_frame() {
+    let Some(mut h) = harness() else { return };
+    h.click("Search settings");
+    for key in ["g", "l", "a", "s", "s"] {
+        h.type_text(key);
+    }
+    assert_eq!(h.view.search, "glass");
+}
+#[test]
 fn search_by_a_control_label_scrolls_inside_an_accordion() {
     let Some(mut h) = harness() else { return };
     let index = search::build_index();

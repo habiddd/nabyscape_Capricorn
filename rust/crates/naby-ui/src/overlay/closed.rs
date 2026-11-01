@@ -331,6 +331,11 @@ impl Overlay {
         };
         let colors = cfg.colors_for(self.palette);
         let look = s.ambient_look();
+        // The live rate, not the cap: a press moves the cap, and that would restart the loop.
+        let glow_motion = naby_core::motion::MotionConfig {
+            frame_limit: self.live_fps,
+            ..self.cfg.motion
+        };
         let change = self.ambient.set(
             naby_core::motion::AmbientColors {
                 primary: colors.primary,
@@ -341,7 +346,7 @@ impl Overlay {
             &s.ambient_motion,
             moving && allowed,
             Some(&look),
-            &self.cfg.motion,
+            &glow_motion,
             now,
         );
         if change.repaint {

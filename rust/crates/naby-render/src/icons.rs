@@ -65,6 +65,7 @@ icons! {
     Trash, "trash", Outline, "M3,6 H21 M9,6 V3 H15 V6 M6,6 L7,21 H17 L18,6 M10,10 V17 M14,10 V17";
     Stop, "stop", Outline, "M6,6 H18 V18 H6 Z";
     Back, "back", Outline, "M15,5 L8,12 15,19";
+    Forward, "forward", Outline, "M9,5 L16,12 9,19";
     Paperclip, "paperclip", Outline, "M21,11 L12,20 A6,6 0 0 1 4,12 L14,2 A4,4 0 0 1 20,8 L10,18 A2,2 0 0 1 7,15 L16,6";
     FileText, "file-text", Outline, "M14,2 H6 Q4,2 4,4 V20 Q4,22 6,22 H18 Q20,22 20,20 V8 Z M14,2 V8 H20 M8,13 H16 M8,17 H14";
     Image, "image", Outline, "M5,3 H19 Q21,3 21,5 V19 Q21,21 19,21 H5 Q3,21 3,19 V5 Q3,3 5,3 Z M3,16 L9,10 16,17 M14,15 L17,12 21,16 M14,7 A1,1 0 1 1 13.99,7";
@@ -487,8 +488,8 @@ mod tests {
     fn every_icon_parses() {
         assert_eq!(
             Icon::ALL.len(),
-            54,
-            "34 outline + 15 filled + 5 shadowed filled"
+            55,
+            "35 outline + 15 filled + 5 shadowed filled"
         );
         for icon in Icon::ALL {
             let p = icon

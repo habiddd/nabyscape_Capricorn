@@ -164,7 +164,14 @@ impl SurfaceMotion {
             let decay = (-omega * dt).exp();
             t.value = t.destination + (delta + temp) * decay;
             t.velocity = (t.velocity - omega * temp) * decay;
-            if (t.value - t.destination).abs() < 0.05 && t.velocity.abs() < 0.5 {
+            // The lift is 0..1 and drives opacity; the rest are DIPs, where a fifth of a pixel
+            // is invisible but the tail below it would cost several full repaints.
+            let (near, slow) = if t.channel == Channel::GlassLift {
+                (0.004, 0.06)
+            } else {
+                (0.2, 4.0)
+            };
+            if (t.value - t.destination).abs() < near && t.velocity.abs() < slow {
                 t.value = t.destination;
                 t.velocity = 0.0;
             } else {
@@ -225,6 +232,41 @@ mod tests {
         assert_eq!(m.value(Channel::SurfaceWidth), Some(600.0));
         assert!(!m.active());
         assert_eq!(m.next_frame(now), None);
+    }
+
+    #[test]
+    fn the_lift_settles_without_a_visible_jump() {
+        let mut m = SurfaceMotion::new();
+        m.go(Channel::GlassLift, 0.0, 1.0, 420.0, true);
+        let mut now = 0.0;
+        let mut previous = 0.0;
+        loop {
+            now += 1.0 / 60.0;
+            let step = m.update(now, true);
+            let value = m.value(Channel::GlassLift).unwrap();
+            if step == Step::Finished {
+                assert!(value - previous < 0.01, "last step {}", value - previous);
+                break;
+            }
+            previous = value;
+            assert!(now < 3.0, "must settle");
+        }
+    }
+
+    #[test]
+    fn a_long_move_settles_in_under_a_second() {
+        let mut m = SurfaceMotion::new();
+        m.go(Channel::SurfaceHeight, 44.0, 347.0, 420.0, true);
+        let mut frames = 0;
+        let mut now = 0.0;
+        loop {
+            now += 1.0 / 60.0;
+            if m.update(now, true) == Step::Finished {
+                break;
+            }
+            frames += 1;
+            assert!(frames < 60, "still moving after {frames} frames");
+        }
     }
 
     #[test]

@@ -291,6 +291,9 @@ pub struct Overlay {
     pub(crate) lyrics_ticking: bool,
     pub(crate) panel_ticks: bool,
     pub(crate) live_work: bool,
+    /// Frame rate of the waveform and the countdown ring.
+    pub(crate) live_fps: u32,
+    pub(crate) glass: surface::GlassCache,
     pub(crate) shown_ambient: bool,
     pub(crate) lyric_anim_until: f64,
     pub(crate) retarget_pending: bool,
@@ -376,6 +379,8 @@ impl Overlay {
             lyrics_ticking: false,
             panel_ticks: false,
             live_work: false,
+            live_fps: 60,
+            glass: Default::default(),
             shown_ambient: false,
             lyric_anim_until: 0.0,
             retarget_pending: false,

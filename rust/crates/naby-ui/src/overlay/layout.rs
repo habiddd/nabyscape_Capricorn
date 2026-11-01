@@ -109,9 +109,7 @@ impl Overlay {
         }
         // Waveform / countdown ring while music or a countdown animates.
         if self.live_work {
-            add(Some(
-                now + 1.0 / f64::from(self.cfg.motion.frame_limit.clamp(15, 240)),
-            ));
+            add(Some(now + 1.0 / f64::from(self.live_fps.clamp(15, 240))));
         }
         // Once-a-second countdown text, once-a-minute clock.
         if self.countdown_visible || (self.expanded && self.panel_ticks) {
@@ -219,8 +217,7 @@ impl Overlay {
         );
         // Content is limited to the (possibly tucked) contour and, on side docks, the monitor.
         if let Some(contour) = self.contour_ref() {
-            let contour = contour.clone();
-            canvas.push_clip_contour(&contour, origin.0, origin.1, s);
+            canvas.push_clip_contour(contour, origin.0, origin.1, s);
         } else {
             canvas.push_clip_rect(rect);
         }

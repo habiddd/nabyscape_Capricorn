@@ -411,6 +411,7 @@ impl<'a> Ui<'a> {
 
         // ---- swatches ---------------------------------------------------------------------
         let mut picked: Option<Rgba> = None;
+        self.gap(6.0);
         self.swatch_grid(presets, &mut picked);
         let mut seen: Vec<Rgba> = Vec::new();
         for c in recent {

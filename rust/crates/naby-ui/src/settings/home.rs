@@ -78,7 +78,7 @@ impl SettingsView {
                         1.6,
                     );
                     c.icon(
-                        Icon::Next,
+                        Icon::Forward,
                         Rect::new(
                             rect.right() - 18.0 - 14.0,
                             rect.y + (rect.h - 14.0) / 2.0,

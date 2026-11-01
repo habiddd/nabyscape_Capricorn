@@ -23,6 +23,8 @@ pub struct TextEditOpts<'a> {
     pub invalid: bool,
     /// Transparent field with only a bottom rule (`MinimalWidgets.Underline`).
     pub underline: bool,
+    /// Paints no border at all: the caller draws the frame around the field.
+    pub frameless: bool,
 }
 
 impl Default for TextEditOpts<'_> {
@@ -35,6 +37,7 @@ impl Default for TextEditOpts<'_> {
             max_len: None,
             invalid: false,
             underline: false,
+            frameless: false,
         }
     }
 }
@@ -70,6 +73,12 @@ impl<'a> TextEditOpts<'a> {
     }
     pub fn underline(mut self) -> Self {
         self.underline = true;
+        self
+    }
+    /// An [`underline`](Self::underline) field without the rule, for a caller-drawn frame.
+    pub fn frameless(mut self) -> Self {
+        self.underline = true;
+        self.frameless = true;
         self
     }
 }
@@ -407,7 +416,8 @@ impl<'a> Ui<'a> {
             } else {
                 th.control_border
             };
-            if o.underline {
+            if o.frameless {
+            } else if o.underline {
                 self.canvas
                     .fill_rect(Rect::new(rect.x, rect.bottom() - 1.0, rect.w, 1.0), border);
             } else {

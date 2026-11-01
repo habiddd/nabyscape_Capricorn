@@ -11,6 +11,7 @@ use naby_core::settings::{presets, Settings};
 use naby_core::store::Store;
 use naby_render::{Canvas, Fonts, InputState};
 use naby_ui::host::{DisplayInfo, Signal};
+use std::rc::Rc;
 use std::time::Instant;
 
 /// What the dock window shows. `OverlayHost` implements it; every method but the first five
@@ -333,7 +334,7 @@ mod os {
         instance: Instance,
         store: Arc<Store>,
         settings: Settings,
-        fonts: Fonts,
+        fonts: Rc<Fonts>,
         canvas: Canvas,
         window: LayeredWindow,
         surface: Box<dyn Surface>,
@@ -348,6 +349,8 @@ mod os {
         followed: Option<String>,
         follow_clock: Instant,
         follow_due: Instant,
+        /// When the current frame's timer fired.
+        frame_start: Instant,
         /// Where the dock window is on screen (outside-click hit testing).
         window_origin: (i32, i32),
         quit: bool,
@@ -484,7 +487,7 @@ mod os {
                 instance,
                 store,
                 settings,
-                fonts: Fonts::load_system(),
+                fonts: Rc::new(Fonts::load_system()),
                 canvas: Canvas::new(1, 1),
                 window,
                 surface,
@@ -499,6 +502,7 @@ mod os {
                 followed: None,
                 follow_clock: Instant::now(),
                 follow_due: Instant::now(),
+                frame_start: Instant::now(),
                 window_origin: (0, 0),
                 quit: false,
                 settings_window: None,
@@ -607,6 +611,7 @@ mod os {
                 AuxWindow::Settings,
                 AuxContent::Settings(Box::new(view)),
                 self.store.clone(),
+                self.fonts.clone(),
                 self.tx.clone(),
                 work,
                 scale,
@@ -629,6 +634,7 @@ mod os {
                 AuxWindow::Welcome,
                 AuxContent::Welcome(Box::new(view)),
                 self.store.clone(),
+                self.fonts.clone(),
                 self.tx.clone(),
                 work,
                 scale,
@@ -1187,7 +1193,16 @@ mod os {
                 (a, b) => a.or(b),
             };
             match next {
-                Some(at) => self.timer.request_frame_at(at),
+                Some(at) => {
+                    let now = Instant::now();
+                    let at = match crate::timer::display_refresh(now) {
+                        Some((vblank, period)) => {
+                            crate::timer::align_to_vblank(at, now, self.frame_start, vblank, period)
+                        }
+                        None => at,
+                    };
+                    self.timer.request_frame_at(at)
+                }
                 None => self.timer.cancel(),
             }
         }
@@ -1196,6 +1211,7 @@ mod os {
             if !self.timer.take_due() {
                 return;
             }
+            self.frame_start = Instant::now();
             self.follow_tick();
             self.follow_due = Instant::now();
             let changed = self.surface.tick();

@@ -348,6 +348,11 @@ impl Canvas {
         self.pixmap.fill(sk_color(c, 1.0));
     }
 
+    /// Overwrites every pixel with bytes saved from [`Canvas::data`] at this size.
+    pub fn restore(&mut self, pixels: &[u8]) {
+        self.pixmap.data_mut().copy_from_slice(pixels);
+    }
+
     pub fn alpha(&self) -> f32 {
         self.alpha
     }

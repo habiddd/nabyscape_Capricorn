@@ -43,6 +43,32 @@ fn mask_alpha(stops: &[(f64, u8)], t: f64) -> f64 {
     stops.last().map_or(0.0, |s| f64::from(s.1) / 255.0)
 }
 
+/// What the painted glass depends on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GlassKey {
+    canvas: (u32, u32),
+    /// The color the canvas was cleared to.
+    backdrop: Rgba,
+    origin: (f32, f32),
+    surf: (f64, f64),
+    radius: f64,
+    notch: bool,
+    scale: f32,
+    lift: f64,
+    light: (f64, f64),
+    tint: Rgba,
+    background: Rgba,
+    strength: f64,
+}
+
+/// The glass pixels: by far the most expensive part of a frame (full-surface gradients through
+/// the contour mask), yet unchanged while only the waveform or the glow moves.
+#[derive(Debug, Default)]
+pub(crate) struct GlassCache {
+    key: Option<GlassKey>,
+    pub(crate) pixels: Vec<u8>,
+}
+
 fn scaled(c: Rgba, k: f64) -> Rgba {
     c.with_alpha((f64::from(c.a) * k.clamp(0.0, 1.0)).round() as u8)
 }
@@ -84,8 +110,13 @@ impl Overlay {
     }
 
     /// Fills the island at `origin` (canvas pixels of the contour's top-left).
-    pub(crate) fn paint_surface(&self, canvas: &mut Canvas, origin: (f32, f32), snaps: &Snapshots) {
-        let Some(contour) = self.contour_ref() else {
+    pub(crate) fn paint_surface(
+        &mut self,
+        canvas: &mut Canvas,
+        origin: (f32, f32),
+        snaps: &Snapshots,
+    ) {
+        let Some((_, contour)) = &self.contour else {
             return;
         };
         let s = self.scale;
@@ -120,9 +151,29 @@ impl Overlay {
         } else {
             Rgba::parse_hex(&settings.background).unwrap_or(Rgba::BLACK)
         };
-        canvas.fill_contour(contour, origin.0, origin.1, s, &Fill::Solid(background));
+        let glass = !quiet && settings.glass_style;
+        let key = glass.then(|| GlassKey {
+            canvas: canvas.size(),
+            backdrop: canvas.pixel(0, 0),
+            origin,
+            surf: self.surf,
+            radius: self.cfg.radius,
+            notch: self.cfg.notch,
+            scale: s,
+            lift: self.lift,
+            light: self.light,
+            tint: self.tint,
+            background,
+            strength: settings.glass_strength,
+        });
+        let cached = key.is_some() && key == self.glass.key && !self.glass.pixels.is_empty();
+        if cached {
+            canvas.restore(&self.glass.pixels);
+        } else {
+            canvas.fill_contour(contour, origin.0, origin.1, s, &Fill::Solid(background));
+        }
         canvas.push_clip_contour(contour, origin.0, origin.1, s);
-        if !quiet && settings.glass_style {
+        if glass && !cached {
             let opacity = ((0.45 + 0.55 * self.lift) * settings.glass_strength) as f32;
             let mat = material(Rgba::parse_hex(&settings.background).unwrap_or(Rgba::BLACK));
             canvas.with_opacity(opacity, |c| {
@@ -179,6 +230,12 @@ impl Overlay {
                 };
                 c.stroke_contour(contour, origin.0, origin.1, s, &edge, 0.75);
             });
+            // A copy is far cheaper than painting the glass again when the key repeats.
+            self.glass.pixels.clear();
+            self.glass.pixels.extend_from_slice(canvas.data());
+            self.glass.key = key;
+        } else if !glass {
+            self.glass = GlassCache::default();
         }
         self.paint_ambient(canvas, rect);
         canvas.pop_clip();
@@ -207,6 +264,42 @@ fn loop_effect(l: &AmbientLoop, now: f64) -> (f64, f64) {
     }
 }
 
+/// Highest relative luminance the glow may reach behind panel text: 4.5:1 for (160,165,173) text.
+const MAX_GLOW_LUMINANCE: f64 = 0.0433;
+
+/// `gain` capped so the brightest glow pixel over black stays under `MAX_GLOW_LUMINANCE`.
+/// Dark or saturated bands already under the limit keep their gain.
+fn legible_gain(band: &ColorBand, fade: &BottomFade, gain: f64) -> f64 {
+    let peak = fade.stops.iter().map(|s| s.1).max().unwrap_or(0);
+    let luminance = |c: Rgba, gain: f64| {
+        let k = f64::from(c.a) / 255.0 * f64::from(peak) / 255.0 * gain.min(1.0);
+        let lin = |v: u8| {
+            let v = f64::from(v) / 255.0 * k;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+    };
+    let over = |g: f64| luminance(band.left, g).max(luminance(band.right, g));
+    if over(gain) <= MAX_GLOW_LUMINANCE {
+        return gain;
+    }
+    // Luminance grows monotonically with gain: bisect for the cap.
+    let (mut lo, mut hi) = (0.0, gain);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if over(mid) <= MAX_GLOW_LUMINANCE {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 /// Draws the color band through the fade mask. Linear masks are painted as 48 strips along the
 /// fade axis, each with the band gradient scaled by the mask alpha at its centre.
 pub fn paint_band(
@@ -217,6 +310,7 @@ pub fn paint_band(
     gain: f64,
     offset: f64,
 ) {
+    let gain = legible_gain(band, fade, gain);
     if rect.is_empty() || gain <= 0.0 {
         return;
     }

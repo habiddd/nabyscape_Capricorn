@@ -129,8 +129,6 @@ impl SettingsView {
                         if resp.clicked && !selected {
                             self.navigate(c.id);
                         }
-                        let tip = self.tr(c.description).to_owned();
-                        ui.tooltip(&resp, &tip);
                     });
                 }
                 ui.gap(18.0);
@@ -163,8 +161,6 @@ impl SettingsView {
     pub(super) fn search_header<'a>(&mut self, ui: &mut Ui<'a>, rect: Rect, pal: &Pal) {
         let th = ui.theme().clone();
         ui.canvas().fill_rrect(rect, 10.0, pal.search_bg);
-        ui.canvas()
-            .stroke_round_rect(rect, 10.0, pal.search_border, 1.0);
         let (canvas, _) = ui.canvas_fonts();
         canvas.icon(
             Icon::Search,
@@ -178,10 +174,16 @@ impl SettingsView {
         let mut text = std::mem::take(&mut self.search);
         let mut resp = Default::default();
         ui.child(field, |ui| {
-            resp = ui.text_edit_with(&mut text, &TextEditOpts::single().hint(&hint).underline());
+            resp = ui.text_edit_with(&mut text, &TextEditOpts::single().hint(&hint).frameless());
         });
         self.search = text;
         let resp: naby_render::Response = resp;
+        let border = if resp.focused {
+            th.input_focus_border
+        } else {
+            pal.search_border
+        };
+        ui.canvas().stroke_round_rect(rect, 10.0, border, 1.0);
         self.search_id = resp.id;
         self.search_focus = resp.focused;
         self.record("Search settings", resp.rect);
@@ -254,63 +256,68 @@ impl SettingsView {
         }
         self.search_enter = None;
         ui.child(inner, |ui| {
-            ui.spacing(0.0);
-            if hits.is_empty() {
-                ui.gap(14.0);
-                let st = ui.text_style(12.0, Weight::Regular, th.text_dim);
-                let r = ui.allocate(None, ui.line_height(&st) * 2.0);
-                let text = self
-                    .tr("No settings found. Try color, dock, lyrics, weather or notifications.");
-                let lines = ui.fonts().wrap(text, &st, r.w - 24.0);
-                for (i, line) in lines.iter().enumerate() {
-                    ui.draw_text(
-                        r.x + 12.0,
-                        r.y + i as f32 * ui.line_height(&st),
-                        line,
-                        &st,
-                        None,
+            ui.scroll_area("search results", |ui| {
+                ui.spacing(0.0);
+                if hits.is_empty() {
+                    ui.gap(14.0);
+                    let st = ui.text_style(12.0, Weight::Regular, th.text_dim);
+                    let r = ui.allocate(None, ui.line_height(&st) * 2.0);
+                    let text = self.tr(
+                        "No settings found. Try color, dock, lyrics, weather or notifications.",
                     );
+                    let lines = ui.fonts().wrap(text, &st, r.w - 24.0);
+                    for (i, line) in lines.iter().enumerate() {
+                        ui.draw_text(
+                            r.x + 12.0,
+                            r.y + i as f32 * ui.line_height(&st),
+                            line,
+                            &st,
+                            None,
+                        );
+                    }
                 }
-            }
-            for (i, item) in hits.iter().enumerate() {
-                let slot = ui.allocate(None, row_h + 2.0);
-                let r = Rect::new(slot.x, slot.y + 1.0, slot.w, row_h);
-                ui.push_id(i, |ui| {
-                    let resp = ui.hit_area(r, true);
-                    self.hand |= resp.hovered;
-                    if resp.hovered || resp.focused {
-                        ui.canvas().fill_rrect(r, 8.0, th.hover_fill);
-                    }
-                    let title = ui.text_style(12.0, Weight::Regular, th.text);
-                    let path = ui.text_style(10.0, Weight::Regular, th.text_dim);
-                    let th_h = ui.line_height(&title);
-                    let ph = ui.line_height(&path);
-                    let top = r.y + (r.h - th_h - 3.0 - ph) / 2.0;
-                    ui.draw_text(
-                        r.x + 12.0,
-                        top,
-                        self.tr(&item.title),
-                        &title,
-                        Some(r.w - 24.0),
-                    );
-                    let mut crumb = category_title(&self.lang, item.category);
-                    if !item.section.is_empty() {
-                        crumb.push_str("  /  ");
-                        crumb.push_str(self.tr(super::categories::friendly_section(item.section)));
-                    }
-                    ui.draw_text(
-                        r.x + 12.0,
-                        top + th_h + 3.0,
-                        &crumb,
-                        &path,
-                        Some(r.w - 24.0),
-                    );
-                    ui.paint_focus_ring(&resp, 8.0);
-                    if resp.clicked {
-                        chosen = Some(item.clone());
-                    }
-                });
-            }
+                for (i, item) in hits.iter().enumerate() {
+                    let slot = ui.allocate(None, row_h + 2.0);
+                    let r = Rect::new(slot.x, slot.y + 1.0, slot.w, row_h);
+                    ui.push_id(i, |ui| {
+                        let resp = ui.hit_area(r, true);
+                        self.hand |= resp.hovered;
+                        if resp.hovered || resp.focused {
+                            ui.canvas().fill_rrect(r, 8.0, th.hover_fill);
+                        }
+                        let title = ui.text_style(12.0, Weight::Regular, th.text);
+                        let path = ui.text_style(10.0, Weight::Regular, th.text_dim);
+                        let th_h = ui.line_height(&title);
+                        let ph = ui.line_height(&path);
+                        let top = r.y + (r.h - th_h - 3.0 - ph) / 2.0;
+                        ui.draw_text(
+                            r.x + 12.0,
+                            top,
+                            self.tr(&item.title),
+                            &title,
+                            Some(r.w - 24.0),
+                        );
+                        let mut crumb = category_title(&self.lang, item.category);
+                        if !item.section.is_empty() {
+                            crumb.push_str("  /  ");
+                            crumb.push_str(
+                                self.tr(super::categories::friendly_section(item.section)),
+                            );
+                        }
+                        ui.draw_text(
+                            r.x + 12.0,
+                            top + th_h + 3.0,
+                            &crumb,
+                            &path,
+                            Some(r.w - 24.0),
+                        );
+                        ui.paint_focus_ring(&resp, 8.0);
+                        if resp.clicked {
+                            chosen = Some(item.clone());
+                        }
+                    });
+                }
+            })
         });
         if let Some(item) = chosen {
             self.open_search_result(item);

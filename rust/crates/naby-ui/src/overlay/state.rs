@@ -37,6 +37,7 @@ impl Overlay {
             self.settings_version = snaps.settings.version();
             self.apply_settings(snaps, first);
         }
+        self.update_frame_limit(snaps);
         self.ensure_contour();
     }
 
@@ -90,7 +91,15 @@ impl Overlay {
         let budget = FrameBudget::new(&snaps.settings.performance, snaps.display.refresh_hz);
         let battery = snaps.battery.on_battery();
         let cpu = snaps.system.cpu.unwrap_or(0.0);
-        self.cfg.motion.frame_limit = budget.limit(self.interacting(), battery, cpu);
+        let limit = budget.limit(self.interacting(), battery, cpu);
+        self.cfg.motion.frame_limit = limit;
+        self.motion.set_fps(limit);
+        // Levels arrive 30 times a second; more than 60 repaints only burn the CPU.
+        self.live_fps = if battery {
+            limit.min(30)
+        } else {
+            limit.min(60)
+        };
     }
 
     // ---- small queries --------------------------------------------------------------
@@ -201,7 +210,6 @@ impl Overlay {
         let target = self.compute_target(snaps);
         self.target_size = target;
         let enabled = self.cfg.motion.enabled;
-        self.motion.set_fps(self.cfg.motion.frame_limit);
         self.motion
             .go(Channel::SurfaceWidth, self.surf.0, target.0, ms, enabled);
         self.motion
@@ -541,6 +549,7 @@ impl Overlay {
         self.art.clear();
         self.art_image = None;
         self.contour = None;
+        self.glass = Default::default();
         self.pressed = None;
         self.pointer = None;
         self.pointer_inside = false;
@@ -669,7 +678,8 @@ impl Overlay {
                 let s = f64::from(self.scale);
                 let x = ((f64::from(p.0 - origin.0)) / s / self.surf.0.max(1.0)).clamp(0.0, 1.0);
                 let y = ((f64::from(p.1 - origin.1)) / s / self.surf.1.max(1.0)).clamp(0.0, 1.0);
-                if (x - self.light.0).abs() + (y - self.light.1).abs() > 0.001 {
+                // Each change repaints the glass (~5 ms); under ~20 px the reflection is invisible.
+                if (x - self.light.0).abs() + (y - self.light.1).abs() > 0.04 {
                     self.light = (x, y);
                     changed = true;
                 }

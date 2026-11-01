@@ -177,7 +177,8 @@ impl<'a> Ui<'a> {
                 self.canvas
                     .fill_rrect(rect, radius, Rgba::BLACK.with_alpha(0x14));
             }
-            if th.high_contrast {
+            // Text buttons sit on cards of nearly their own fill; the outline is what shows them.
+            if th.high_contrast || (!primary && round.is_none()) {
                 self.canvas
                     .stroke_round_rect(rect, radius, th.control_border, 1.0);
             }

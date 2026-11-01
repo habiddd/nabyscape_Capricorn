@@ -37,7 +37,8 @@ pub fn frame_limit_for(
             if battery || cpu > 85.0 {
                 hz.min(60)
             } else if interactive {
-                hz
+                // Every frame is painted by the CPU: above this a drag costs more than it shows.
+                hz.min(120)
             } else {
                 hz.min(60)
             }
@@ -178,7 +179,8 @@ mod tests {
     #[test]
     fn performance_profiles_adapt_to_battery_load_and_interaction() {
         use Performance::*;
-        assert_eq!(frame_limit_for(Auto, 180, true, false, 20.0), 180);
+        assert_eq!(frame_limit_for(Auto, 180, true, false, 20.0), 120);
+        assert_eq!(frame_limit_for(Auto, 75, true, false, 20.0), 75);
         assert_eq!(frame_limit_for(Auto, 180, false, false, 20.0), 60);
         assert_eq!(frame_limit_for(Auto, 180, true, true, 20.0), 60);
         assert_eq!(frame_limit_for(Auto, 180, true, false, 90.0), 60);

@@ -61,17 +61,82 @@ pub fn relative_due_100ns(at: Instant, now: Instant) -> i64 {
     -ticks.max(1)
 }
 
+/// Moves an animation deadline onto the display's refresh grid, so frames land evenly instead of
+/// drifting against it. `at` was computed after painting, so the time spent since `frame_start`
+/// comes off it: otherwise "60 fps" means 60 fps minus the paint time. Far deadlines (clock ticks)
+/// and immediate ones (input) stay as they are.
+pub fn align_to_vblank(
+    at: Instant,
+    now: Instant,
+    frame_start: Instant,
+    vblank: Instant,
+    period: Duration,
+) -> Instant {
+    if at <= now || at - now > Duration::from_millis(100) || period.is_zero() {
+        return at;
+    }
+    let target = at
+        .checked_sub(now.saturating_duration_since(frame_start))
+        .unwrap_or(at);
+    let period_s = period.as_secs_f64();
+    let mut n = if target >= vblank {
+        ((target - vblank).as_secs_f64() / period_s).round()
+    } else {
+        -((vblank - target).as_secs_f64() / period_s).round()
+    };
+    let grid = |n: f64| {
+        if n >= 0.0 {
+            vblank + period.mul_f64(n)
+        } else {
+            vblank.checked_sub(period.mul_f64(-n)).unwrap_or(vblank)
+        }
+    };
+    while grid(n) <= now {
+        n += 1.0;
+    }
+    grid(n)
+}
+
 #[cfg(windows)]
-pub use os::AnimationTimer;
+pub use os::{display_refresh, AnimationTimer};
 
 #[cfg(windows)]
 mod os {
     use super::*;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+    use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
+    use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
     use windows::Win32::System::Threading::{
         CancelWaitableTimer, CreateWaitableTimerExW, SetWaitableTimer,
     };
+
+    /// A vertical blank and the refresh period, from the desktop compositor. The blank goes stale
+    /// while nothing on screen changes; its phase stays good and it refreshes once frames flow.
+    pub fn display_refresh(now: Instant) -> Option<(Instant, Duration)> {
+        let mut info = DWM_TIMING_INFO {
+            cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32,
+            ..Default::default()
+        };
+        let (mut counter, mut frequency) = (0i64, 0i64);
+        // SAFETY: the out pointers are live locals; a null window asks for the desktop's timing.
+        unsafe {
+            DwmGetCompositionTimingInfo(HWND::default(), &mut info).ok()?;
+            QueryPerformanceCounter(&mut counter).ok()?;
+            QueryPerformanceFrequency(&mut frequency).ok()?;
+        }
+        if frequency <= 0 || info.qpcRefreshPeriod == 0 {
+            return None;
+        }
+        let seconds = |ticks: u64| Duration::from_secs_f64(ticks as f64 / frequency as f64);
+        let vblank = info.qpcVBlank as i64;
+        let vblank = if vblank >= counter {
+            now + seconds((vblank - counter) as u64)
+        } else {
+            now.checked_sub(seconds((counter - vblank) as u64))?
+        };
+        Some((vblank, seconds(info.qpcRefreshPeriod)))
+    }
 
     /// `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` (Windows 10 1803+).
     const HIGH_RESOLUTION: u32 = 0x2;
@@ -188,5 +253,58 @@ mod tests {
         );
         assert_eq!(relative_due_100ns(t0, t0 + Duration::from_secs(1)), -1);
         assert_eq!(relative_due_100ns(t0, t0), -1);
+    }
+
+    #[test]
+    fn frames_land_on_the_refresh_grid() {
+        let vblank = Instant::now();
+        let period = Duration::from_micros(16_667);
+        // Woke on a blank, painted for 5 ms, asked for "one frame later": the very next blank.
+        let start = vblank;
+        let now = start + Duration::from_millis(5);
+        let at = now + period;
+        assert_eq!(
+            align_to_vblank(at, now, start, vblank, period),
+            vblank + period
+        );
+        // A paint longer than the frame takes the first blank that is still ahead.
+        let now = start + Duration::from_millis(20);
+        let at = now + period;
+        assert_eq!(
+            align_to_vblank(at, now, start, vblank, period),
+            vblank + period * 2
+        );
+        // 60 fps on a 120 Hz display keeps every second blank.
+        let fast = Duration::from_micros(8_333);
+        let now = start + Duration::from_millis(3);
+        let at = now + period;
+        assert_eq!(
+            align_to_vblank(at, now, start, vblank, fast),
+            vblank + fast * 2
+        );
+    }
+
+    #[test]
+    fn immediate_and_far_deadlines_are_left_alone() {
+        let now = Instant::now() + Duration::from_secs(1);
+        let period = Duration::from_micros(16_667);
+        assert_eq!(align_to_vblank(now, now, now, now, period), now);
+        let far = now + Duration::from_secs(30);
+        assert_eq!(align_to_vblank(far, now, now, now, period), far);
+        let soon = now + Duration::from_millis(5);
+        assert_eq!(align_to_vblank(soon, now, now, now, Duration::ZERO), soon);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "needs a desktop session"]
+    fn the_compositor_reports_a_sane_refresh() {
+        let now = Instant::now();
+        let (vblank, period) = display_refresh(now).expect("timing");
+        println!(
+            "period {period:?}, vblank {:?} old",
+            now.saturating_duration_since(vblank)
+        );
+        assert!(period > Duration::from_millis(2) && period < Duration::from_millis(50));
     }
 }

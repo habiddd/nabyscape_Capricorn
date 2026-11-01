@@ -1025,3 +1025,224 @@ fn snapshot_notification() {
     assert_eq!(r.state(), OverlayState::Notice);
     save(&mut r, "overlay-notice");
 }
+
+#[test]
+fn the_cached_glass_paints_the_same_pixels() {
+    let rig = || {
+        let mut s = quiet_settings();
+        s.hover_peek = false;
+        let mut r = Rig::new(s);
+        r.playing_media("Blue Hour", "The Hours");
+        r.signal(Signal::Panel);
+        r.settle();
+        r
+    };
+    let mut r = rig();
+    r.paint();
+    r.settle();
+    r.paint();
+    r.paint();
+    let painted = r.canvas.data().to_vec();
+    assert!(
+        !r.overlay.glass.pixels.is_empty(),
+        "the first frame saves it"
+    );
+    r.paint();
+    assert!(
+        r.canvas.data() == painted.as_slice(),
+        "restored frame differs"
+    );
+    // A different backdrop must not show the old one.
+    r.canvas.clear(Rgba::rgb(0x3D, 0x41, 0x4A));
+    let corner = r.canvas.pixel(0, 0);
+    r.overlay.paint(&mut r.canvas, &r.fonts, &r.snaps);
+    assert_eq!(r.canvas.pixel(0, 0), corner);
+    // The light moved: the cache must be replaced, not served stale.
+    r.paint();
+    r.paint();
+    r.overlay.light = (0.1, 0.9);
+    r.paint();
+    r.paint();
+    let mut fresh = rig();
+    fresh.overlay.light = (0.1, 0.9);
+    fresh.paint();
+    fresh.settle();
+    fresh.paint();
+    fresh.paint();
+    assert!(
+        r.canvas.data() == fresh.canvas.data(),
+        "stale glass after a light change"
+    );
+}
+
+#[test]
+fn small_pointer_moves_keep_the_cached_reflection() {
+    let mut s = quiet_settings();
+    s.hover_peek = false;
+    let mut r = Rig::new(s);
+    r.playing_media("Blue Hour", "The Hours");
+    r.signal(Signal::Panel);
+    r.settle();
+    r.paint();
+    let c = r.center();
+    r.point(Some(c));
+    r.paint();
+    let light = r.overlay.light;
+    r.point(Some((c.0 + 2.0, c.1)));
+    assert_eq!(r.overlay.light, light, "2 px must not move the reflection");
+    r.point(Some((c.0 + 100.0, c.1)));
+    assert_ne!(r.overlay.light, light, "100 px must move it");
+}
+
+/// Paints a glow of `color` (full band alpha) with the default fade over black; returns the canvas.
+fn glow_over_black(color: Rgba) -> Canvas {
+    use naby_core::motion::{bottom_fade, ColorBand};
+    use naby_core::settings::AmbientLook;
+    let mut c = Canvas::new(100, 100);
+    c.clear(Rgba::BLACK);
+    let band = ColorBand {
+        left: color,
+        right: color,
+        angle: 0,
+    };
+    let fade = bottom_fade(1.0, &AmbientLook::default());
+    surface::paint_band(
+        &mut c,
+        naby_render::Rect::new(0.0, 0.0, 100.0, 100.0),
+        &band,
+        &fade,
+        1.0,
+        0.0,
+    );
+    c
+}
+
+fn relative_luminance(p: Rgba) -> f64 {
+    let lin = |v: u8| {
+        let v = f64::from(v) / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(p.r) + 0.7152 * lin(p.g) + 0.0722 * lin(p.b)
+}
+
+#[test]
+fn a_white_glow_stays_dark_enough_for_panel_text() {
+    let c = glow_over_black(Rgba::WHITE);
+    let top = (0..100)
+        .map(|y| relative_luminance(c.pixel(50, y)))
+        .fold(0.0, f64::max);
+    assert!(top > 0.01, "the glow must still show, got {top}");
+    assert!(top <= 0.0433 + 0.002, "luminance {top}");
+}
+
+#[test]
+fn a_dark_glow_is_not_dimmed() {
+    let color = Rgba::rgb(0, 0, 120);
+    let c = glow_over_black(color);
+    // Unscaled composite at the bottom row: fade alpha at t~1 is 255.
+    let p = c.pixel(50, 99);
+    let a = f64::from(bottom_alpha_at_bottom_row()) / 255.0;
+    let want = (120.0 * a).round();
+    assert!(
+        (f64::from(p.b) - want).abs() <= 1.0,
+        "blue {} vs unscaled {want}",
+        p.b
+    );
+}
+
+fn bottom_alpha_at_bottom_row() -> u8 {
+    use naby_core::motion::bottom_fade;
+    use naby_core::settings::AmbientLook;
+    let fade = bottom_fade(1.0, &AmbientLook::default());
+    // Last of the 48 strips is centred at 47.5/48 of the height.
+    let t: f64 = 47.5 / 48.0;
+    let i = (t * 8.0).floor() as usize;
+    let (a, b) = (fade.stops[i], fade.stops[i + 1]);
+    let f = (t - a.0) / (b.0 - a.0);
+    (f64::from(a.1) + (f64::from(b.1) - f64::from(a.1)) * f).round() as u8
+}
+
+#[test]
+fn pressing_raises_the_frame_cap_without_restarting_the_glow() {
+    let mut s = quiet_settings();
+    s.hover_peek = false;
+    s.ambient_motion = "Drift".into();
+    let mut r = Rig::new(s);
+    let mut display = (*r.snaps.display).clone();
+    display.refresh_hz = 120;
+    r.snaps.display.set(display);
+    r.playing_media("Blue Hour", "The Hours");
+    r.signal(Signal::Panel);
+    r.settle();
+    r.paint();
+    r.settle();
+    assert_eq!(r.overlay.cfg.motion.frame_limit, 60);
+    let start = r.overlay.ambient.loop_state().expect("glow loop").start;
+    r.overlay.pressed = Some(Hot::Surface);
+    r.advance(0.1);
+    assert_eq!(
+        r.overlay.cfg.motion.frame_limit, 120,
+        "the cap follows input"
+    );
+    assert_eq!(r.overlay.live_fps, 60);
+    let glow = r.overlay.ambient.loop_state().expect("glow loop");
+    assert_eq!(glow.start, start, "the glow must not jump back");
+    assert_eq!(glow.fps, 60.0);
+}
+
+/// Frame cost report, not a check: `cargo test --release -p naby-ui --lib frame_cost -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn frame_cost_report() {
+    fn cost(r: &mut Rig, name: &str, moving: bool) {
+        let frames = 300;
+        let start = std::time::Instant::now();
+        for i in 0..frames {
+            if moving {
+                r.overlay.light.0 = f64::from(i) / 1000.0;
+            }
+            r.snaps.now += 1.0 / 60.0;
+            r.snaps.levels.peak = 0.6;
+            r.snaps.levels.sequence += 1;
+            r.overlay.tick(&r.snaps, &mut r.out);
+            r.paint();
+        }
+        let (w, h) = r.overlay.size(&r.snaps);
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / f64::from(frames);
+        println!(
+            "{name:<16} {w:>4}x{h:<4} {ms:>6.2} ms/frame  {:>5.1}% of one core at 60 fps",
+            ms * 6.0
+        );
+    }
+    let mut s = quiet_settings();
+    s.closed_media_content = "Waveform".into();
+    s.closed_media_icon = "Artwork".into();
+    let mut closed = Rig::new(s);
+    closed.playing_media("Blue Hour", "The Hours");
+    closed.settle();
+    cost(&mut closed, "closed-wave", false);
+
+    let mut hover = Rig::new(quiet_settings());
+    hover.playing_media("Blue Hour", "The Hours");
+    hover.paint();
+    hover.hover_center();
+    hover.advance(1.0);
+    hover.settle();
+    hover.paint();
+    cost(&mut hover, "hover-media", false);
+
+    let mut s = quiet_settings();
+    s.hover_peek = false;
+    let mut open = Rig::new(s);
+    open.playing_media("Blue Hour", "The Hours");
+    open.signal(Signal::Panel);
+    open.settle();
+    open.paint();
+    open.settle();
+    cost(&mut open, "open-media", false);
+    cost(&mut open, "open-moving", true);
+}

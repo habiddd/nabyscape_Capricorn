@@ -110,7 +110,8 @@ impl SettingsView {
             self.page_area(ui, workspace, rail_w, bp, preview_on, pal);
         }
         // The search field is drawn last so its results card sits below it.
-        self.search_header(ui, search_rect, pal);
+        // Its own id scope: what was drawn before changes while typing, and focus must survive it.
+        ui.push_id("search", |ui| self.search_header(ui, search_rect, pal));
 
         // ---- preview rail ---------------------------------------------------------------
         if rail_w > 0.0 && !searching {
