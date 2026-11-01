@@ -18,6 +18,7 @@ pub mod models;
 pub mod persistence;
 pub mod providers;
 pub mod readiness;
+pub mod router;
 pub mod speech;
 pub mod sse;
 pub mod storage;

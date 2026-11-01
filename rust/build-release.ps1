@@ -150,7 +150,7 @@ function Get-Sha256([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm
 function Get-Pinned($Entry) {
     $target = Join-Path $cache ($Entry.sha256.ToLowerInvariant() + '-' + $Entry.name)
     if (-not (Test-Path -LiteralPath $target)) {
-        Write-Output "Downloading $($Entry.name) ($($Entry.arch))"
+        Write-Host "Downloading $($Entry.name) ($($Entry.arch))"
         Invoke-WebRequest -Uri $Entry.url -OutFile $target -UseBasicParsing
     }
     if ((Get-Sha256 $target) -ne $Entry.sha256.ToLowerInvariant()) {
@@ -213,6 +213,10 @@ run entirely on this PC; no audio leaves the device for the default listening mo
 
 Whistle recognizes English, German, French, Spanish, Italian, Dutch and Polish (auto-detected).
 The exact files and SHA-256 hashes shipped are pinned in rust/whistle.lock of the source tree.
+
+needle3-es.cact is the Cactus Needle 3 model (Hugging Face Cactus-Compute/needle3, Apache-2.0),
+modified: fine-tuned by the NabyScape project for Spanish and its quick commands. It runs only on
+this PC. The training scripts are in rust/tools/needle-finetune of the source tree.
 '@ | Set-Content -LiteralPath (Join-Path $notices 'WHISTLE-NOTICE.txt') -Encoding utf8
 @'
 Piper text-to-speech
@@ -256,11 +260,18 @@ try {
         New-Item -ItemType Directory -Path $stage | Out-Null
         Copy-Item -LiteralPath $exe -Destination (Join-Path $stage 'NabyScape.exe')
         $payload = @()
-        foreach ($entry in (@($lock) + @($piperLock)) | Where-Object { $_.arch -in 'any', $t.Arch }) {
+        foreach ($entry in (@($lock) + @($piperLock)) | Where-Object { $_.arch -in 'any', $t.Arch -and $_.name -ne 'needle3.cact' }) {
             $file = Get-Pinned $entry
             Copy-Item -LiteralPath $file -Destination (Join-Path $stage $entry.name)
             $payload += $entry.name
         }
+        # The fine-tuned router model lives in the repository; the app trusts only this hash.
+        $tuned = Join-Path $workspace 'models/needle3-es.cact'
+        $tunedSource = Get-Content -LiteralPath (Join-Path $workspace 'crates/naby-win/src/voice/whistle.rs') -Raw
+        if ($tunedSource -notmatch 'TUNED_MODEL_SHA256: &str =\s*"([0-9a-f]{64})"') { throw 'Could not read TUNED_MODEL_SHA256.' }
+        if ((Get-Sha256 $tuned) -ne $Matches[1]) { throw 'rust/models/needle3-es.cact does not match TUNED_MODEL_SHA256.' }
+        Copy-Item -LiteralPath $tuned -Destination (Join-Path $stage 'needle3-es.cact')
+        $payload += 'needle3-es.cact'
         foreach ($required in 'needle.exe', 'whistle.cact') {
             if ($payload -notcontains $required) { throw "whistle.lock has no $required for $($t.Arch)." }
         }

@@ -56,6 +56,11 @@ impl Collector {
         }
     }
 
+    /// The utterance so far (for live captions).
+    pub fn audio(&self) -> &[f32] {
+        &self.buf
+    }
+
     pub fn collecting(&self) -> bool {
         self.vad.collecting()
     }
@@ -152,6 +157,24 @@ pub struct TurnOptions<'a> {
     pub language: Option<&'a str>,
     pub keywords: &'a [String],
     pub stream_replies: bool,
+    /// What Naby said last, to tell its own voice from a request.
+    pub last_reply: &'a str,
+}
+
+/// Lowercase words without punctuation.
+fn plain_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The microphone heard Naby's own reply: three or more words in the same order as it said them.
+/// Shorter matches ("sí", "por favor") are what people really answer.
+pub fn is_own_echo(heard: &str, last_reply: &str) -> bool {
+    let (heard, reply) = (plain_words(heard), plain_words(last_reply));
+    heard.len() >= 3 && reply.windows(heard.len()).any(|w| w == heard)
 }
 
 /// Runs one voice turn to completion (blocking: call from a worker thread).
@@ -202,7 +225,7 @@ pub fn run_turn(
             .chars()
             .take(MAXIMUM_TRANSCRIPT_CHARS)
             .collect();
-        if text.is_empty() {
+        if text.is_empty() || is_own_echo(&text, options.last_reply) {
             turn.apply(TurnEvent::NoSpeech);
             emit(Event::Status(NO_SPEECH.into()));
             emit(Event::Phase(State::Listening));
@@ -222,11 +245,17 @@ pub fn run_turn(
     let mut sentences = VoiceSentences::new(!options.stream_replies);
     let mut chunks = 0usize;
     let mut speak_error: Option<String> = None;
+    let mut last_sentence = String::new();
     let mut speak = |sentence: String,
                      turn: &mut VoiceTurn,
                      emit: &mut dyn FnMut(Event),
                      chunks: &mut usize|
      -> Result<(), String> {
+        // Small local models can loop on a sentence; once is enough.
+        if plain_words(&sentence) == plain_words(&last_sentence) {
+            return Ok(());
+        }
+        last_sentence.clone_from(&sentence);
         emit(Event::Spoken(sentence.clone()));
         let synthesis = Instant::now();
         let pcm = speaker.synthesize(&sentence, cancel)?;
@@ -424,6 +453,18 @@ mod tests {
     }
 
     #[test]
+    fn naby_hearing_itself_is_not_a_request() {
+        let reply = "Claro, la capital de Francia es París. ¿Quieres saber algo más?";
+        assert!(is_own_echo("Quieres saber algo más", reply));
+        assert!(is_own_echo("la capital de Francia.", reply));
+        // Short answers and new requests go through.
+        assert!(!is_own_echo("claro", reply));
+        assert!(!is_own_echo("algo más", reply));
+        assert!(!is_own_echo("cuál es la capital de Italia", reply));
+        assert!(!is_own_echo("hola otra vez amigo", ""));
+    }
+
+    #[test]
     fn silence_is_ignored_and_a_spoken_phrase_becomes_one_utterance() {
         let mut c = Collector::new(0.018, 800);
         assert!(feed(&mut c, &[(100, 0.001); 5])
@@ -482,6 +523,7 @@ mod tests {
             language: None,
             keywords: &keywords,
             stream_replies: true,
+            last_reply: "",
         };
         let mut events = Vec::new();
         let outcome = run_turn(
@@ -541,6 +583,7 @@ mod tests {
             language: None,
             keywords: &[],
             stream_replies: true,
+            last_reply: "",
         };
         let mut events = Vec::new();
         let outcome = run_turn(
@@ -577,6 +620,7 @@ mod tests {
             language: None,
             keywords: &[],
             stream_replies: false,
+            last_reply: "",
         };
         let mut events = Vec::new();
         let outcome = run_turn(
@@ -611,6 +655,7 @@ mod tests {
             language: None,
             keywords: &[],
             stream_replies: true,
+            last_reply: "",
         };
         let outcome = run_turn(
             Some(&[0.1; 100]),
@@ -658,6 +703,7 @@ mod tests {
             language: None,
             keywords: &[],
             stream_replies: true,
+            last_reply: "",
         };
         let outcome = run_turn(
             Some(&[0.1; 100]),
@@ -691,6 +737,7 @@ mod tests {
             language: None,
             keywords: &[],
             stream_replies: false,
+            last_reply: "",
         };
         let outcome = run_turn(
             None,

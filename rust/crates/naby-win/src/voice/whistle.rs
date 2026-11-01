@@ -34,6 +34,13 @@ pub const UNPINNED: &str = "TO_BE_PINNED";
 /// The model file and engine program names.
 pub const MODEL_FILE: &str = "whistle.cact";
 pub const ENGINE_FILE: &str = "needle.exe";
+/// The function-calling model behind quick commands (`naby_core::assistant::router`).
+pub const NEEDLE_MODEL_FILE: &str = "needle3.cact";
+/// The same model fine-tuned for Spanish and these commands (`rust/tools/needle-finetune`), shipped
+/// beside the executable from `rust/models` and used only with this exact hash.
+pub const TUNED_MODEL_FILE: &str = "needle3-es.cact";
+pub const TUNED_MODEL_SHA256: &str =
+    "804fd41b2990042893a8142b61f75e2bd6d7a5debd8e7f4c395d63788538622f";
 /// The folder under `local-speech` that Settings installs Whistle into.
 pub const INSTALL_FOLDER: &str = "whistle";
 /// The folder under `local-speech` of the pip runtime (a virtual environment, the model, the
@@ -62,6 +69,24 @@ try:
 except Exception as error:
     result = {"error": str(error)}
 print(json.dumps(result))
+"#;
+/// Live captions for one utterance, run as `python -I -c <this> <model> <keywords>`. Reads frames
+/// (4-byte little-endian size, then 32-bit float samples) and prints a JSON line for each. Closing
+/// stdin ends it at once: the final text comes from `PIP_SCRIPT`, so the tail is not worth a pass.
+pub const PIP_LIVE_SCRIPT: &str = r#"import json, os, sys
+import needle
+
+def chunks():
+    while True:
+        size = int.from_bytes(sys.stdin.buffer.read(4), "little")
+        if not size:
+            os._exit(0)
+        yield sys.stdin.buffer.read(size)
+
+confirmed = ""
+for piece in needle.stream(chunks(), keywords=sys.argv[2] or None, weights=sys.argv[1]):
+    confirmed = (confirmed + " " + piece.get("text", "")).strip()
+    print(json.dumps({"confirmed": confirmed, "pending": piece.get("pending", "")}), flush=True)
 "#;
 /// Whistle's input rate.
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -288,6 +313,20 @@ pub fn pip_python(folder: &std::path::Path) -> std::path::PathBuf {
     folder.join("venv").join("Scripts").join("python.exe")
 }
 
+/// A venv runs on the Python that created it, so uninstalling or upgrading that one breaks it.
+fn venv_base_exists(folder: &std::path::Path) -> bool {
+    std::fs::read_to_string(folder.join("venv").join("pyvenv.cfg"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find(|(key, _)| key.trim() == "home")
+        .is_some_and(|(_, home)| {
+            std::path::Path::new(home.trim())
+                .join("python.exe")
+                .is_file()
+        })
+}
+
 /// [`availability_in`] for the pip runtime: its interpreter, script (written last by the
 /// install) and model sit in `folder`, and the model is pinned.
 pub fn availability_pip_in(
@@ -307,6 +346,9 @@ pub fn availability_pip_in(
         if !path.is_file() {
             return Err(Unavailable::Missing(name.to_owned()));
         }
+    }
+    if !venv_base_exists(folder) {
+        return Err(Unavailable::Missing("Python".to_owned()));
     }
     if !allow_unpinned && !entry.pinned() {
         return Err(Unavailable::Unpinned);
@@ -355,6 +397,9 @@ pub fn python_command(
         .env("HOME", folder.join("home"))
         .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
         .env("PYTHONUTF8", "1")
+        // Another Python setup on this PC must not leak into the environment.
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH")
         .current_dir(folder)
         .stdin(std::process::Stdio::null());
     #[cfg(windows)]
@@ -473,8 +518,8 @@ fn joined(value: Option<&serde_json::Value>) -> String {
     }
 }
 
-/// Parses the JSON of `needle_stream_transcribe_process` / `_stop` (confirmed / pending words,
-/// given as strings or word arrays).
+/// Parses a line of [`PIP_LIVE_SCRIPT`] (confirmed / pending words, given as strings or word
+/// arrays).
 pub fn parse_partial(json: &str) -> Result<Partial, String> {
     let json = json.trim_matches(char::from(0)).trim();
     let value: serde_json::Value = serde_json::from_str(json)
@@ -502,6 +547,100 @@ pub fn parse_partial(json: &str) -> Result<Partial, String> {
             .to_owned();
     }
     Ok(partial)
+}
+
+/// Live text while one utterance is spoken (pip runtime only: `needle.exe` streams clips, not a
+/// microphone). Its own Python process, so no memory stays in use between turns. Captions are
+/// only for display and best-effort; the turn still transcribes the finished utterance. Dropping
+/// this closes the process's stdin (which ends it) and `on_text` is never called afterwards.
+pub struct LiveCaptions {
+    audio: Sender<Vec<f32>>,
+    alive: Arc<Mutex<bool>>,
+    fed: usize,
+}
+
+impl LiveCaptions {
+    pub fn start(
+        folder: &std::path::Path,
+        keywords: &[String],
+        mut on_text: impl FnMut(String) + Send + 'static,
+    ) -> std::io::Result<Self> {
+        use std::io::{BufRead, Write};
+        use std::process::Stdio;
+        let mut command = python_command(&pip_python(folder), folder);
+        command
+            .arg("-I")
+            .arg("-c")
+            .arg(PIP_LIVE_SCRIPT)
+            .arg(folder.join(MODEL_FILE))
+            .arg(keywords_arg(keywords).unwrap_or_default())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn()?;
+        let (stdin, stdout) = (child.stdin.take(), child.stdout.take());
+        let (audio, inbox) = channel::<Vec<f32>>();
+        std::thread::Builder::new()
+            .name("NabyScape captions audio".into())
+            .spawn(move || {
+                let Some(mut stdin) = stdin else { return };
+                for mut samples in &inbox {
+                    // While the engine is busy audio piles up here and goes as one longer chunk.
+                    samples.extend(inbox.try_iter().flatten());
+                    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+                    let frame = [&(bytes.len() as u32).to_le_bytes()[..], &bytes].concat();
+                    if stdin
+                        .write_all(&frame)
+                        .and_then(|()| stdin.flush())
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            })?;
+        let alive = Arc::new(Mutex::new(true));
+        let open = alive.clone();
+        std::thread::Builder::new()
+            .name("NabyScape captions text".into())
+            .spawn(move || {
+                if let Some(stdout) = stdout {
+                    for line in std::io::BufReader::new(stdout)
+                        .lines()
+                        .map_while(Result::ok)
+                    {
+                        let Ok(partial) = parse_partial(&line) else {
+                            continue;
+                        };
+                        // The lock makes dropping `LiveCaptions` wait out a call in progress.
+                        let open = open.lock().unwrap_or_else(|e| e.into_inner());
+                        if !*open {
+                            break;
+                        }
+                        on_text(partial.text());
+                    }
+                }
+                let _ = child.wait();
+            })?;
+        Ok(Self {
+            audio,
+            alive,
+            fed: 0,
+        })
+    }
+
+    /// Takes the whole utterance so far and sends what is new, about a second at a time.
+    pub fn feed(&mut self, utterance: &[f32]) {
+        if utterance.len() >= self.fed + SAMPLE_RATE as usize {
+            let _ = self.audio.send(utterance[self.fed..].to_vec());
+            self.fed = utterance.len();
+        }
+    }
+}
+
+impl Drop for LiveCaptions {
+    fn drop(&mut self) {
+        *self.alive.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    }
 }
 
 /// Result buffer size for `count` samples (`count / 16000 * OUTPUT_BYTES_PER_SECOND`, floored).
@@ -565,13 +704,6 @@ pub trait Backend: Send {
         keywords: Option<&str>,
         words: bool,
     ) -> Result<String, String>;
-    fn stream_process(
-        &mut self,
-        pcm: &[f32],
-        language: Option<&str>,
-        keywords: Option<&str>,
-    ) -> Result<String, String>;
-    fn stream_stop(&mut self) -> Result<String, String>;
     /// Releases the engine.
     fn unload(&mut self);
 }
@@ -584,15 +716,6 @@ enum Job {
         language: Option<String>,
         keywords: Option<String>,
         words: bool,
-        reply: Sender<Result<String, String>>,
-    },
-    StreamProcess {
-        pcm: Vec<f32>,
-        language: Option<String>,
-        keywords: Option<String>,
-        reply: Sender<Result<String, String>>,
-    },
-    StreamStop {
         reply: Sender<Result<String, String>>,
     },
     /// Wake the worker so it recomputes its idle deadline.
@@ -758,21 +881,6 @@ fn worker(
                     words,
                 ));
             }
-            Ok(Job::StreamProcess {
-                pcm,
-                language,
-                keywords,
-                reply,
-            }) => {
-                let _ = reply.send(backend.stream_process(
-                    &pcm,
-                    language.as_deref(),
-                    keywords.as_deref(),
-                ));
-            }
-            Ok(Job::StreamStop { reply }) => {
-                let _ = reply.send(backend.stream_stop());
-            }
             Ok(Job::Recheck) => {}
             Ok(Job::Stop)
             | Err(RecvTimeoutError::Timeout)
@@ -822,26 +930,6 @@ impl WhistleLease {
         reply_rx
             .recv()
             .map_err(|_| "Whistle stopped. Start voice again.".to_owned())?
-    }
-
-    /// Feeds streaming audio and returns the live partial text.
-    pub fn stream(&self, pcm: &[f32], keywords: &[String]) -> Result<Partial, String> {
-        let language = self.language.clone();
-        let keywords = keywords_arg(keywords);
-        let pcm = pcm.to_vec();
-        let json = self.call(|reply| Job::StreamProcess {
-            pcm,
-            language,
-            keywords,
-            reply,
-        })?;
-        parse_partial(&json)
-    }
-
-    /// Ends the stream and returns the final settled text.
-    pub fn stream_end(&self) -> Result<Partial, String> {
-        let json = self.call(|reply| Job::StreamStop { reply })?;
-        parse_partial(&json)
     }
 }
 
@@ -905,17 +993,6 @@ mod native {
         ) -> Result<String, String> {
             Err("Whistle is unavailable.".into())
         }
-        fn stream_process(
-            &mut self,
-            _: &[f32],
-            _: Option<&str>,
-            _: Option<&str>,
-        ) -> Result<String, String> {
-            Err("Whistle is unavailable.".into())
-        }
-        fn stream_stop(&mut self) -> Result<String, String> {
-            Err("Whistle is unavailable.".into())
-        }
         fn unload(&mut self) {}
     }
 
@@ -926,6 +1003,50 @@ mod native {
     pub fn pip_backend(_: std::path::PathBuf) -> Box<dyn Backend> {
         Box::new(Absent)
     }
+
+    pub fn route_prompt(_: &std::path::Path, _: &str) -> Result<String, String> {
+        Err("Needle runs on Windows only.".into())
+    }
+}
+
+pub use native::route_prompt;
+
+/// Where quick commands run from: beside the executable when the setup shipped the tuned model,
+/// otherwise `install`, the Settings install folder.
+pub fn router_dir(install: &std::path::Path) -> std::path::PathBuf {
+    let exe = std::env::current_exe().ok();
+    router_dir_in(exe.as_deref().and_then(std::path::Path::parent), install)
+}
+
+fn router_dir_in(
+    exe_dir: Option<&std::path::Path>,
+    install: &std::path::Path,
+) -> std::path::PathBuf {
+    exe_dir
+        .filter(|dir| {
+            [ENGINE_FILE, TUNED_MODEL_FILE]
+                .iter()
+                .all(|name| dir.join(name).is_file())
+        })
+        .unwrap_or(install)
+        .to_path_buf()
+}
+
+/// Whether Needle's files for quick commands are in `folder`.
+pub fn router_installed(folder: &std::path::Path) -> bool {
+    folder.join(ENGINE_FILE).is_file()
+        && [NEEDLE_MODEL_FILE, TUNED_MODEL_FILE]
+            .iter()
+            .any(|name| folder.join(name).is_file())
+}
+
+/// Whether `bytes` are the tuned model this build trusts.
+pub fn is_tuned_model(bytes: &[u8]) -> bool {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+        == TUNED_MODEL_SHA256
 }
 
 /// A 16 kHz mono 16-bit PCM RIFF WAV of `pcm` (samples in [-1, 1], clamped), for `needle.exe`.
@@ -971,6 +1092,56 @@ mod native {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     /// An utterance is at most 60 s of audio; a stuck engine is stopped after this.
     const TIMEOUT: Duration = Duration::from_secs(90);
+    /// Someone is waiting for the chat reply behind a routing decision.
+    const ROUTE_TIMEOUT: Duration = Duration::from_secs(8);
+
+    /// Asks Needle about one request with a fresh process, so nothing stays in memory and one
+    /// request cannot leak into the next. Both files are hashed once per run of the app.
+    pub fn route_prompt(folder: &Path, prompt: &str) -> Result<String, String> {
+        static VERIFIED: Mutex<Option<&str>> = Mutex::new(None);
+        let mut verified = VERIFIED.lock().unwrap_or_else(|e| e.into_inner());
+        let model = match *verified {
+            Some(model) => model,
+            None => {
+                let lock = Lock::embedded().map_err(|e| e.message())?;
+                verify(&lock, folder, ENGINE_FILE, current_arch()).map_err(|e| e.message())?;
+                let tuned = std::fs::read(folder.join(TUNED_MODEL_FILE))
+                    .is_ok_and(|bytes| is_tuned_model(&bytes));
+                let model = if tuned {
+                    TUNED_MODEL_FILE
+                } else {
+                    verify(&lock, folder, NEEDLE_MODEL_FILE, current_arch())
+                        .map_err(|e| e.message())?;
+                    NEEDLE_MODEL_FILE
+                };
+                *verified = Some(model);
+                model
+            }
+        };
+        drop(verified);
+        let (tools, out, err) = (scratch("json"), scratch("out"), scratch("err"));
+        let _files = Scratch(vec![tools.clone(), out.clone(), err.clone()]);
+        std::fs::write(&tools, naby_core::assistant::router::TOOLS)
+            .map_err(io("write the tools"))?;
+        let mut command = engine_command(folder);
+        command
+            .arg("--model")
+            .arg(folder.join(model))
+            .arg("--tools")
+            .arg(&tools)
+            .arg("--prompt")
+            .arg(prompt);
+        run(&mut command, folder, &out, &err, ROUTE_TIMEOUT)
+    }
+
+    /// `needle.exe` with its telemetry off (Cactus documents it as on by default in the binary).
+    fn engine_command(folder: &Path) -> Command {
+        let mut command = Command::new(folder.join(ENGINE_FILE));
+        command
+            .env("NEEDLE_TELEMETRY", "0")
+            .env("DO_NOT_TRACK", "1");
+        command
+    }
 
     pub struct Native {
         folder: PathBuf,
@@ -1084,7 +1255,7 @@ mod native {
                     .arg(if words { "1" } else { "0" });
                 command
             } else {
-                let mut command = Command::new(self.folder.join(ENGINE_FILE));
+                let mut command = engine_command(&self.folder);
                 command.arg("--model").arg(&model).arg("--audio").arg(&wav);
                 if let Some(language) = &language {
                     command.args(["--audio-language", language]);
@@ -1097,20 +1268,7 @@ mod native {
                 }
                 command
             };
-            run(&mut command, &self.folder, &out, &err)
-        }
-
-        fn stream_process(
-            &mut self,
-            _: &[f32],
-            _: Option<&str>,
-            _: Option<&str>,
-        ) -> Result<String, String> {
-            Err("Live transcription is not available with needle.exe.".into())
-        }
-
-        fn stream_stop(&mut self) -> Result<String, String> {
-            Err("Live transcription is not available with needle.exe.".into())
+            run(&mut command, &self.folder, &out, &err, TIMEOUT)
         }
 
         fn unload(&mut self) {
@@ -1119,8 +1277,14 @@ mod native {
     }
 
     /// Runs `command` in `folder` with its output in `out` and `err` (the caller deletes them),
-    /// stops it after [`TIMEOUT`], and returns the last JSON line it printed.
-    fn run(command: &mut Command, folder: &Path, out: &Path, err: &Path) -> Result<String, String> {
+    /// stops it after `limit`, and returns the last JSON line it printed.
+    fn run(
+        command: &mut Command,
+        folder: &Path,
+        out: &Path,
+        err: &Path,
+        limit: Duration,
+    ) -> Result<String, String> {
         let stdout = std::fs::File::create(out).map_err(io("start"))?;
         let stderr = std::fs::File::create(err).map_err(io("start"))?;
         let mut child = command
@@ -1135,7 +1299,7 @@ mod native {
         let status = loop {
             match child.try_wait().map_err(io("run"))? {
                 Some(status) => break status,
-                None if started.elapsed() > TIMEOUT => {
+                None if started.elapsed() > limit => {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err("Whistle took too long and was stopped.".into());
@@ -1241,11 +1405,123 @@ mod tests {
             );
             assert!(!heard.text.is_empty());
         }
+        let (tx, rx) = channel();
+        let mut captions = LiveCaptions::start(&folder, &keywords, move |text| {
+            let _ = tx.send(text);
+        })
+        .unwrap();
+        // Paced like a microphone: the text must grow while the clip plays.
+        let started = std::time::Instant::now();
+        let mut live = Vec::new();
+        for second in (SAMPLE_RATE as usize..=pcm.len()).step_by(SAMPLE_RATE as usize) {
+            captions.feed(&pcm[..second]);
+            std::thread::sleep(Duration::from_secs(1));
+            for text in rx.try_iter() {
+                println!("{:.1} s: {text}", started.elapsed().as_secs_f64());
+                live.push(text);
+            }
+        }
+        assert!(live.len() >= 3, "{live:?}");
+        drop(captions);
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(rx.try_recv().is_err(), "no captions after the drop");
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(rx.try_recv().is_err(), "no captions after the drop");
         let home = folder.join("home");
         println!(
             "engine cache inside the folder: {}",
             home.join(".cache").exists()
         );
+    }
+
+    /// The real router end to end: `NABY_WHISTLE_DIR` holds `needle.exe` and `needle3.cact`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "needs the Needle files; set NABY_WHISTLE_DIR"]
+    fn the_real_needle_routes_instructions_and_leaves_conversation_to_chat() {
+        use naby_core::assistant::router::{decide, prompt, worth_asking};
+        let folder = std::path::PathBuf::from(std::env::var("NABY_WHISTLE_DIR").unwrap());
+        let mut wrong = Vec::new();
+        for (text, acts) in [
+            ("pausa la música", true),
+            ("pausa la canción", true),
+            ("pon el volumen al 40", true),
+            ("baja el volumen al 20", true),
+            ("abre el clima", true),
+            ("muestra el calendario", true),
+            ("abre las notas", true),
+            ("pon un temporizador de cinco minutos", true),
+            ("pon un temporizador de 10 minutos", true),
+            ("siguiente canción", true),
+            ("canción anterior", true),
+            ("reproduce la música", true),
+            ("pause the music", true),
+            ("open the weather page", true),
+            ("set a timer for 10 minutes", true),
+            ("next song", true),
+            ("set the volume to 20", true),
+            ("play the music", true),
+            ("silencia el audio", true),
+            ("mute the audio", true),
+            ("pon pausa a la música", true),
+            ("volumen al 37", true),
+            ("temporizador 25 minutos", true),
+            ("no quiero que pauses nada", false),
+            ("no silencies el audio", false),
+            ("do not skip this song", false),
+            ("adoro esta música", false),
+            ("esta canción me pone triste", false),
+            ("sugiéreme una canción alegre", false),
+            ("quién compuso esta música", false),
+            ("explica el volumen de un cilindro", false),
+            ("muéstrame cómo cambiar una llanta", false),
+            ("enséñame francés", false),
+            ("abre tu mente a nuevas ideas", false),
+            ("el siguiente capítulo es largo", false),
+            ("la versión anterior era mejor", false),
+            ("dame una receta de pan", false),
+            ("buenas tardes", false),
+            ("estoy aburrido", false),
+            ("explícame qué es la fotosíntesis", false),
+            ("escríbeme un poema sobre el mar", false),
+            ("cómo estás hoy", false),
+            ("no quiero que pongas música", false),
+            ("no pauses la música", false),
+            ("me gusta esta canción", false),
+            ("recomiéndame una canción", false),
+            ("abre tu corazón y cuéntame un secreto", false),
+            ("tell me a joke", false),
+            ("what is the weather usually like in Spain", false),
+            ("qué hora es", false),
+        ] {
+            let started = std::time::Instant::now();
+            let routed = worth_asking(text)
+                .then(|| route_prompt(&folder, &prompt(text)).unwrap())
+                .and_then(|output| decide(text, &output));
+            println!(
+                "{:.2} s {text}: {routed:?}",
+                started.elapsed().as_secs_f64()
+            );
+            if routed.is_some() != acts {
+                wrong.push(text);
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    #[test]
+    fn the_shipped_tuned_model_wins_over_the_install_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (exe, install) = (dir.path().join("exe"), dir.path().join("install"));
+        std::fs::create_dir(&exe).unwrap();
+        assert_eq!(router_dir_in(None, &install), install);
+        assert_eq!(router_dir_in(Some(&exe), &install), install);
+        std::fs::write(exe.join(ENGINE_FILE), "").unwrap();
+        assert_eq!(router_dir_in(Some(&exe), &install), install, "no model yet");
+        std::fs::write(exe.join(TUNED_MODEL_FILE), "").unwrap();
+        assert_eq!(router_dir_in(Some(&exe), &install), exe);
+        assert!(router_installed(&exe));
+        assert!(!is_tuned_model(b"anything else"));
     }
 
     #[test]
@@ -1302,7 +1578,7 @@ mod tests {
     #[test]
     fn the_embedded_lock_parses_and_lists_every_file() {
         let lock = Lock::embedded().unwrap();
-        assert_eq!(lock.entries().len(), 3);
+        assert_eq!(lock.entries().len(), 4);
         let model = lock.entry(MODEL_FILE, "x64").unwrap();
         assert_eq!(model.arch, "any");
         assert!(model
@@ -1513,17 +1789,6 @@ mod tests {
                 keywords.unwrap_or("").replace('\n', "|")
             ))
         }
-        fn stream_process(
-            &mut self,
-            pcm: &[f32],
-            _: Option<&str>,
-            _: Option<&str>,
-        ) -> Result<String, String> {
-            Ok(format!(r#"{{"confirmed":"{}","pending":"x"}}"#, pcm.len()))
-        }
-        fn stream_stop(&mut self) -> Result<String, String> {
-            Ok(r#"{"confirmed":"done","pending":""}"#.into())
-        }
         fn unload(&mut self) {
             self.unloads.fetch_add(1, Ordering::SeqCst);
         }
@@ -1568,9 +1833,6 @@ mod tests {
             .unwrap();
         assert_eq!(t.text, "160 samples");
         assert_eq!(t.language.as_deref(), Some("en"));
-        let p = lease.stream(&[0.0; 10], &[]).unwrap();
-        assert_eq!(p.text(), "10 x");
-        assert_eq!(lease.stream_end().unwrap().text(), "done");
         // While a lease is held the model stays, however long it idles.
         std::thread::sleep(Duration::from_millis(150));
         assert!(whistle.loaded() && unloads.load(Ordering::SeqCst) == 0);
@@ -1672,6 +1934,12 @@ mod tests {
         std::fs::write(folder.join(MODEL_FILE), "").unwrap();
         assert_eq!(check(), Err(Unavailable::Missing(PIP_SCRIPT_FILE.into())));
         std::fs::write(folder.join(PIP_SCRIPT_FILE), PIP_SCRIPT).unwrap();
+        // The Python the venv was created from must still exist.
+        let config = folder.join("venv").join("pyvenv.cfg");
+        std::fs::write(&config, "home = C:\\gone\\Python313\n").unwrap();
+        assert_eq!(check(), Err(Unavailable::Missing("Python".into())));
+        let base = pip_python(&folder).parent().unwrap().to_owned();
+        std::fs::write(&config, format!("version = 3\nhome = {}\n", base.display())).unwrap();
         assert_eq!(check(), Ok(()));
         assert_eq!(
             availability_pip_in(&folder, &lock, "x64", false),

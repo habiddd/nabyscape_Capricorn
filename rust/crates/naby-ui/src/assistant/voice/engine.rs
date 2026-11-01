@@ -28,6 +28,8 @@ pub const PIPER_PATH_KEY: &str = "PiperVoicePath";
 pub const PIPER_CUSTOM: &str = "custom";
 /// The unknown-key name for how Whistle runs (`Exe` or `Pip`).
 pub const WHISTLE_RUNTIME_KEY: &str = "WhistleRuntime";
+/// The unknown-key name for the Needle quick commands switch.
+pub const QUICK_COMMANDS_KEY: &str = "QuickCommands";
 
 /// How Whistle runs: the Cactus `needle.exe` (default) or the `cactus-needle` Python package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -65,6 +67,19 @@ pub fn set_whistle_runtime(local: &mut LocalVoiceOptions, runtime: WhistleRuntim
                 .extra
                 .insert(WHISTLE_RUNTIME_KEY.into(), Value::String("Pip".into()));
         }
+    }
+}
+
+/// Whether Needle runs simple instructions without the chat model (off until the user turns it on).
+pub fn quick_commands(local: &LocalVoiceOptions) -> bool {
+    local.extra.get(QUICK_COMMANDS_KEY).and_then(Value::as_bool) == Some(true)
+}
+
+pub fn set_quick_commands(local: &mut LocalVoiceOptions, on: bool) {
+    if on {
+        local.extra.insert(QUICK_COMMANDS_KEY.into(), Value::Bool(true));
+    } else {
+        local.extra.remove(QUICK_COMMANDS_KEY);
     }
 }
 

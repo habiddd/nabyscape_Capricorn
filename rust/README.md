@@ -131,7 +131,22 @@ restart, an idle worker restarts on the new runtime):
   `transcribe.py` and runs it once so the engine is fetched at install time. All caches
   (`HF_HOME`, the engine's `~/.cache`) stay in that folder, every Python process runs with
   `NEEDLE_TELEMETRY=0` and `DO_NOT_TRACK=1`, and each utterance runs `python -I transcribe.py`.
-  pip's transitive dependencies are not hash-pinned, unlike `needle.exe`.
+  pip's transitive dependencies are not hash-pinned, unlike `needle.exe`. A venv still runs on the
+  Python that created it: if that one is removed, Whistle reports it and Install rebuilds the venv.
+  Only this runtime has live captions: while you speak a second Python process streams the audio
+  through `needle.stream`, and it ends with the utterance (`needle.exe` streams clips, not a
+  microphone). The turn itself still uses the transcript of the finished utterance.
+
+**Quick commands** (Settings > Voice > Models, off by default) run short instructions without the
+chat model and without a reply: pause, play, skip, volume, timer, open a page. `needle3.cact`
+(pinned in `whistle.lock`, Apache-2.0) and `needle.exe` install into the Whistle folder and run in a
+fresh process per request (about 1 s, 80 MB with the base model, 134 MB with the tuned one). Needle picks the action, but the words of the request
+must back it (`naby_core::assistant::router`): it played music for "no quiero que pongas música"
+when trusted alone. Anything in doubt goes to chat. Sentences that cannot be instructions never
+start the model. Setup and Portable ship `rust/models/needle3-es.cact` beside the exe, so nothing downloads;
+it replaces the base model when its hash matches `TUNED_MODEL_SHA256`. Fine-tuned for Spanish on an
+RTX 3050 in WSL (`tools/needle-finetune`). The word
+checks stay: its confidence is untrained and reads 1.0 on wrong calls. Check it with `the_real_needle_routes_instructions` (ignored test).
 
 The wake word uses Whistle when it is the listening engine and installed, so while the wake word
 is on the microphone stays open and Whistle keeps listening (the Wake word page says so); nothing

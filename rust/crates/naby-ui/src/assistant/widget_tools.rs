@@ -4,10 +4,11 @@
 
 use std::sync::{Arc, Mutex};
 
+use naby_core::assistant::router::{self, Routed};
 use naby_core::assistant::tools::{
     chat_tools as _chat_tools, check_call, list_response, navigate_response, no_pages_response,
     not_found_response, page_choices, pages_from_widgets, resolve_navigation, widget_tools,
-    Navigation, Outcome, WidgetAction, WidgetPage,
+    Navigation, Outcome, WidgetAction, WidgetPage, NAVIGATE_TOOL,
 };
 use naby_core::assistant::{Call, Tool};
 use naby_core::command::Command;
@@ -58,7 +59,11 @@ struct Inner {
     widget_pages: Vec<(String, String)>,
     enabled_widgets: Vec<String>,
     current: String,
+    router: Option<Router>,
 }
+
+/// Asks the routing model about a request and returns its raw answer (`None`: off or failed).
+pub type Router = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// The shared tool runner for chat and the Hermes bridge.
 #[derive(Clone)]
@@ -96,6 +101,10 @@ impl WidgetTools {
         inner.widget_pages = widget_pages;
     }
 
+    pub fn set_router(&self, router: Router) {
+        self.lock().router = Some(router);
+    }
+
     /// The page the dock shows when the host knows it.
     pub fn set_current(&self, page: &str) {
         self.lock().current = page.to_owned();
@@ -112,6 +121,29 @@ impl WidgetTools {
 }
 
 impl ToolRunner for WidgetTools {
+    fn route_command(&self, text: &str) -> bool {
+        if !router::worth_asking(text) {
+            return false;
+        }
+        let Some(ask) = self.lock().router.clone() else {
+            return false;
+        };
+        let answer = ask(&router::prompt(text)).and_then(|output| router::decide(text, &output));
+        match answer {
+            Some(Routed::Run(command)) => {
+                self.queue.push(command);
+                true
+            }
+            Some(Routed::Page(page)) => {
+                let arguments = serde_json::json!({ "page": page }).to_string();
+                let reply = self.execute(&Call::new("router", NAVIGATE_TOOL, &arguments));
+                // A disabled page, or navigation off: chat can explain.
+                serde_json::from_str::<serde_json::Value>(&reply).is_ok_and(|r| r["ok"] == true)
+            }
+            None => false,
+        }
+    }
+
     fn tools(&self) -> Vec<Tool> {
         let inner = self.lock();
         let choices = page_choices(&inner.pages, &inner.enabled_widgets);
@@ -199,6 +231,32 @@ mod tests {
         assert!(ids.contains(&"media") && ids.contains(&"focus") && ids.contains(&"notes"));
         assert_eq!(reply["current"], "unavailable");
         assert!(queue.drain().is_empty());
+    }
+
+    #[test]
+    fn a_routed_instruction_runs_and_anything_else_stays_with_chat() {
+        let (tools, queue) = tools();
+        let answer = |name: &str, args: &str| {
+            format!(
+                r#"{{"function_calls":[{{"name":"{name}","arguments":{args}}}],"confidence":0.8}}"#
+            )
+        };
+        // No router set: nothing runs.
+        assert!(!tools.route_command("pausa la música"));
+        let (pause, open) = (
+            answer("media_control", r#"{"action":"pause"}"#),
+            answer("open_page", r#"{"page":"weather"}"#),
+        );
+        let replies = Arc::new(Mutex::new(vec![open, pause]));
+        tools.set_router(Arc::new(move |_| replies.lock().unwrap().pop()));
+        assert!(tools.route_command("pausa la música"));
+        assert_eq!(queue.drain(), vec![Command::MediaPause]);
+        // Weather is disabled here: the navigation rules still apply.
+        assert!(!tools.route_command("abre el clima"));
+        assert!(queue.drain().is_empty());
+        // The model is out of answers, and conversation never reaches it.
+        assert!(!tools.route_command("pausa la música"));
+        assert!(!tools.route_command("cuéntame un chiste"));
     }
 
     #[test]

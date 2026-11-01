@@ -19,5 +19,12 @@
     "url": "https://huggingface.co/Cactus-Compute/needle3/resolve/d6c7d6a2e9655505e0f8e23339356dd1705900eb/windows-arm64/needle.exe",
     "bytes": 1359360,
     "sha256": "64a0e0d269fbc87e839551a5396575b604e77706e9ad18dd2969c30e97f752df"
+  },
+  {
+    "name": "needle3.cact",
+    "arch": "any",
+    "url": "https://huggingface.co/Cactus-Compute/needle3/resolve/d6c7d6a2e9655505e0f8e23339356dd1705900eb/needle3.cact",
+    "bytes": 35335380,
+    "sha256": "c9d915eca282ed42d1a09b143b592adb4cc6744ffe2d294adf5cfc5548170c38"
   }
 ]

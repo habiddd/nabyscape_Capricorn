@@ -647,6 +647,23 @@ impl Worker {
                     watchdog_cancel.store(true, Ordering::SeqCst);
                 }
             });
+        if self.files.is_empty() && self.tools.route_command(&self.text) {
+            drop(done);
+            self.shared
+                .conversation()
+                .record_routed_command(&self.text);
+            let old = self.shared.model().items.clone();
+            let items = mirror(self.shared.conversation().messages(), &old);
+            self.shared.edit(|m| {
+                m.items = items;
+                m.busy = false;
+                m.live = None;
+                m.draft.clear();
+                m.state = State::Idle;
+                m.status = "Ready".into();
+            });
+            return;
+        }
         let outcome = self.turn(&cancel);
         drop(done);
 

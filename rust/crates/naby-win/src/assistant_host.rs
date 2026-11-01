@@ -976,6 +976,7 @@ mod os {
             );
             let queue = CommandQueue::new(waker);
             let tools = WidgetTools::new(queue.clone());
+            tools.set_router(voice.router());
             let mut host = Self {
                 summary_key: (0, 0),
                 service,

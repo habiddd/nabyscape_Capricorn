@@ -824,7 +824,7 @@ impl VoiceSettingsView {
         ui.label_dim(&self.host.whistle_status());
         let active = engine::whistle_runtime(&options.local_voice);
         ui.label_dim(&format!(
-            "Runs with {}. needle.exe is recommended and needs nothing else; pip needs Python on this PC.",
+            "Runs with {}. needle.exe is recommended and needs nothing else; pip needs Python on this PC, keeps it in its own environment and shows your words live while you speak.",
             active.label()
         ));
         ui.row(|ui| {
@@ -847,6 +847,22 @@ impl VoiceSettingsView {
                     }
                 }
             });
+        });
+
+        // Needle: simple instructions without the chat model.
+        ui.section_label("Quick commands");
+        ui.label("Needle");
+        ui.label_dim("Runs short instructions on this PC with no reply: pause, play or skip music, set the volume, mute, start a timer, open a page. Anything else goes to your chat model. About 37 MB from Cactus Compute, checked against a pinned checksum. Uses about 80 MB only while deciding, and short instructions take about a second.");
+        let on = engine::quick_commands(&options.local_voice);
+        let label = match (on, self.host.quick_commands_installed()) {
+            (true, _) => "Turn off",
+            (false, true) => "Turn on",
+            (false, false) => "Install and turn on",
+        };
+        ui.enabled(!panel.busy, |ui| {
+            if ui.button(label).clicked {
+                self.host.use_quick_commands(!on);
+            }
         });
 
         // Piper: the default speaking voice, shipped beside the app.

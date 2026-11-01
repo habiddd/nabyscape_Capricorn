@@ -37,7 +37,7 @@ use super::realtime::{self, Cmd, Out, Report};
 use super::wake::{self, WakeListener};
 use super::wake_logic::{WakeAction, WakeLogic};
 use super::wake_whistle::WhistleWake;
-use super::whistle::{self, Transcriber, Whistle};
+use super::whistle::{self, LiveCaptions, Transcriber, Whistle};
 use crate::microphones;
 use crate::wake::Waker;
 
@@ -126,6 +126,10 @@ struct SendListener(Detector);
 // created in the MTA; every call goes through the `listener` mutex.
 unsafe impl Send for SendListener {}
 
+/// How long the microphone stays deaf after a reply, so its last words are not heard as a request
+/// (a device buffer that is empty is not a silent room; Bluetooth adds its own delay).
+const ECHO_TAIL: Duration = Duration::from_millis(700);
+
 /// Cheap to clone.
 #[derive(Clone)]
 pub struct VoiceRuntime {
@@ -183,6 +187,41 @@ impl VoiceRuntime {
         } else {
             installer.install_whistle(runtime, Box::new(switch));
         }
+    }
+
+    /// Turns quick commands on or off; turning on installs Needle first when it is missing.
+    pub fn use_quick_commands(&self, on: bool) {
+        let me = self.clone();
+        let switch = move || {
+            let _ = me.inner.service.edit_options(|o: &mut Options| {
+                engine::set_quick_commands(&mut o.local_voice, on);
+                Ok(())
+            });
+            me.notify();
+        };
+        let installer = &self.inner.installer;
+        if !on || whistle::router_installed(&whistle::router_dir(&installer.whistle_dir())) {
+            switch();
+        } else {
+            installer.install_router(Box::new(switch));
+        }
+    }
+
+    /// What the widget tools ask about a request: Needle's answer when quick commands are on.
+    pub fn router(&self) -> naby_ui::assistant::widget_tools::Router {
+        let me = self.clone();
+        Arc::new(move |text| {
+            let inner = &me.inner;
+            engine::quick_commands(&inner.service.options().local_voice)
+                .then(|| {
+                    whistle::route_prompt(
+                        &whistle::router_dir(&inner.installer.whistle_dir()),
+                        text,
+                    )
+                    .ok()
+                })
+                .flatten()
+        })
     }
 
     pub fn installer(&self) -> &Arc<SpeechInstaller> {
@@ -777,6 +816,14 @@ impl VoiceRuntime {
         let processing = Arc::new(AtomicBool::new(false));
         let collector = Mutex::new(Collector::new(local.sensitivity, local.silence_ms));
         let (flag, mine) = (processing.clone(), self.clone());
+        let install = self.inner.installer.whistle_dir();
+        let runtime = engine::whistle_runtime(&local);
+        let mut live_folder = (engine::resolve(&local).listening == Listening::Whistle
+            && runtime == engine::WhistleRuntime::Pip
+            && whistle::availability_for(runtime, &install).is_ok())
+        .then(|| whistle::pip_dir(&install));
+        let live_keywords = engine::keywords(options);
+        let mut captions: Option<LiveCaptions> = None;
         let on_audio = move |chunk: &[f32]| {
             let level = peak(chunk);
             mine.publish_level(Some(level), None);
@@ -785,10 +832,35 @@ impl VoiceRuntime {
                 collector.reset();
                 return;
             }
-            if let Collected::Utterance(audio) = collector.push(chunk) {
-                flag.store(true, Ordering::SeqCst);
-                collector.reset();
-                let _ = utterances.send(audio);
+            match collector.push(chunk) {
+                Collected::Speaking => {
+                    if let (None, Some(folder)) = (&captions, &live_folder) {
+                        let me = mine.clone();
+                        captions = LiveCaptions::start(folder, &live_keywords, move |text| {
+                            me.publish(|s| s.partial = text);
+                        })
+                        .ok();
+                        // Text still arrives at the end of the turn; don't retry every chunk.
+                        if captions.is_none() {
+                            live_folder = None;
+                        }
+                    }
+                    if let Some(captions) = &mut captions {
+                        captions.feed(collector.audio());
+                    }
+                }
+                Collected::Utterance(audio) => {
+                    captions = None;
+                    flag.store(true, Ordering::SeqCst);
+                    collector.reset();
+                    let _ = utterances.send(audio);
+                }
+                Collected::Rejected => {
+                    if captions.take().is_some() {
+                        mine.publish(|s| s.partial.clear());
+                    }
+                }
+                Collected::Idle => {}
             }
         };
         let failer = self.clone();
@@ -816,6 +888,7 @@ impl VoiceRuntime {
                         cancel: cancel.clone(),
                     };
                     let mut state = VoiceTurn::new();
+                    let mut last_reply = String::new();
                     // One tick of level reporting while the reply plays.
                     for audio in inbox {
                         if cancel.load(Ordering::SeqCst) {
@@ -826,7 +899,9 @@ impl VoiceRuntime {
                             language: None,
                             keywords: &keywords,
                             stream_replies: stream,
+                            last_reply: &last_reply,
                         };
+                        let mut reply = String::new();
                         let outcome = pipeline::run_turn(
                             Some(&audio),
                             None,
@@ -837,11 +912,24 @@ impl VoiceRuntime {
                             &opts,
                             &mut state,
                             &cancel,
-                            &mut |event| me.on_turn_event(id, &turn, event),
+                            &mut |event| {
+                                if let Event::Spoken(sentence) = &event {
+                                    reply.push(' ');
+                                    reply.push_str(sentence);
+                                }
+                                me.on_turn_event(id, &turn, event)
+                            },
                         );
+                        if !reply.is_empty() {
+                            last_reply = reply;
+                        }
                         if let Outcome::Failed(message) = &outcome {
                             me.fail(id, &format!("Voice stopped. {message}"));
                             break;
+                        }
+                        if outcome == Outcome::Finished {
+                            // Speakers and the room still sound after the device buffer is empty.
+                            std::thread::sleep(ECHO_TAIL);
                         }
                         processing.store(false, Ordering::SeqCst);
                     }
@@ -878,6 +966,7 @@ impl VoiceRuntime {
                     if phase == State::Listening {
                         s.mic_level = 0.0;
                         s.output_level = 0.0;
+                        s.partial.clear();
                     }
                 });
                 turn.set_phase(phase, "Voice", true);
@@ -1513,6 +1602,14 @@ impl VoiceHost for VoiceBridge {
     }
     fn use_whistle(&self, runtime: engine::WhistleRuntime) {
         self.runtime.use_whistle(runtime);
+    }
+    fn quick_commands_installed(&self) -> bool {
+        whistle::router_installed(&whistle::router_dir(
+            &self.runtime.inner.installer.whistle_dir(),
+        ))
+    }
+    fn use_quick_commands(&self, on: bool) {
+        self.runtime.use_quick_commands(on);
     }
     fn whistle_detects_wake(&self) -> bool {
         self.runtime

@@ -18,6 +18,11 @@ pub trait ToolRunner: Send + Sync {
     fn tools(&self) -> Vec<Tool>;
     /// Runs one validated-by-the-runner call and returns the JSON text for the model.
     fn execute(&self, call: &Call) -> String;
+    /// Runs `text` when it is a simple instruction that needs no reply (see
+    /// `naby_core::assistant::router`). False sends it to the chat model. Blocking.
+    fn route_command(&self, _text: &str) -> bool {
+        false
+    }
 }
 
 /// A tool runner that offers nothing.

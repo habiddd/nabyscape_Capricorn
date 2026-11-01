@@ -490,15 +490,24 @@ pub fn install_whistle_pip(
     progress("Looking for Python\u{2026}", 2.0);
     let python = find_python(folder)?;
     let venv = whistle::pip_python(folder);
-    if !venv.is_file() {
-        progress("Creating the Whistle environment\u{2026}", 5.0);
-        let mut command = whistle::python_command(&python, folder);
-        command.args(["-m", "venv"]).arg(folder.join("venv"));
-        run_python(command, &log, "Creating the environment", cancel, hour)?;
-    }
+    // Always fresh: a leftover environment may point at a Python that is gone.
+    progress("Creating the Whistle environment\u{2026}", 5.0);
+    let mut command = whistle::python_command(&python, folder);
+    command
+        .args(["-m", "venv", "--clear"])
+        .arg(folder.join("venv"));
+    run_python(command, &log, "Creating the environment", cancel, hour)?;
     progress("Installing cactus-needle with pip\u{2026}", 15.0);
     let mut command = whistle::python_command(&venv, folder);
-    command.args(["-m", "pip", "install", "--no-input", whistle::PIP_PACKAGE]);
+    // `--isolated`: the user's pip settings (such as `target` or `user`) could install elsewhere.
+    command.args([
+        "-m",
+        "pip",
+        "--isolated",
+        "install",
+        "--no-input",
+        whistle::PIP_PACKAGE,
+    ]);
     run_python(command, &log, "pip", cancel, hour)?;
     let model = folder.join(whistle::MODEL_FILE);
     install_whistle_files(
@@ -1467,6 +1476,20 @@ impl SpeechInstaller {
         runtime: WhistleRuntime,
         done: Box<dyn FnOnce() + Send>,
     ) {
+        self.install_cactus("Whistle", Some(runtime), done);
+    }
+
+    /// Installs Needle's files for quick commands on a worker (same flow as Whistle).
+    pub fn install_router(self: &Arc<Self>, done: Box<dyn FnOnce() + Send>) {
+        self.install_cactus("Needle", None, done);
+    }
+
+    fn install_cactus(
+        self: &Arc<Self>,
+        what: &'static str,
+        runtime: Option<WhistleRuntime>,
+        done: Box<dyn FnOnce() + Send>,
+    ) {
         let cancel = {
             let mut s = self.state();
             if s.installing || s.scanning || !self.storage.begin() {
@@ -1476,10 +1499,10 @@ impl SpeechInstaller {
             s.cancel = Arc::new(AtomicBool::new(false));
             s.cancel.clone()
         };
-        self.report("Preparing the Whistle install\u{2026}", 0.0);
+        self.report(&format!("Preparing the {what} install\u{2026}"), 0.0);
         let me = self.clone();
         let spawned = std::thread::Builder::new()
-            .name("NabyScape Whistle install".into())
+            .name(format!("NabyScape {what} install"))
             .spawn(move || {
                 let result = whistle::Lock::embedded()
                     .map_err(|e| msg(e.message()))
@@ -1487,7 +1510,16 @@ impl SpeechInstaller {
                         let mut progress = |text: &str, value: f64| me.report(text, value);
                         let (arch, entries) = (whistle::current_arch(), lock.entries());
                         match runtime {
-                            WhistleRuntime::Exe => install_whistle_files(
+                            None => install_whistle_files(
+                                &[whistle::NEEDLE_MODEL_FILE, whistle::ENGINE_FILE],
+                                entries,
+                                arch,
+                                &me.whistle_dir(),
+                                &cancel,
+                                false,
+                                &mut progress,
+                            ),
+                            Some(WhistleRuntime::Exe) => install_whistle_files(
                                 &[whistle::MODEL_FILE, whistle::ENGINE_FILE],
                                 entries,
                                 arch,
@@ -1496,7 +1528,7 @@ impl SpeechInstaller {
                                 false,
                                 &mut progress,
                             ),
-                            WhistleRuntime::Pip => install_whistle_pip(
+                            Some(WhistleRuntime::Pip) => install_whistle_pip(
                                 entries,
                                 arch,
                                 &whistle::pip_dir(&me.whistle_dir()),
@@ -1510,15 +1542,17 @@ impl SpeechInstaller {
                 me.state().installing = false;
                 match result {
                     Ok(()) => {
-                        me.report("Whistle installed and verified.", 100.0);
+                        me.report(&format!("{what} installed and verified."), 100.0);
                         done();
                     }
                     Err(Fail::Cancelled) => me.report(
-                        "Whistle installation cancelled. Choose an install button to retry.",
+                        &format!(
+                            "{what} installation cancelled. Choose an install button to retry."
+                        ),
                         0.0,
                     ),
                     Err(Fail::Message(m)) => {
-                        me.report(&format!("Whistle installation failed: {m}"), 0.0)
+                        me.report(&format!("{what} installation failed: {m}"), 0.0)
                     }
                 }
             });

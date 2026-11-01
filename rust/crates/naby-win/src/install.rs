@@ -38,9 +38,10 @@ pub const RETIRED_HOST_FILES: [&str; 5] = [
     "RUST-Library-COPYRIGHT.html",
 ];
 /// Files the setup carries next to the executable. Nothing else is ever extracted.
-pub const PAYLOAD_FILES: [&str; 10] = [
+pub const PAYLOAD_FILES: [&str; 11] = [
     "needle.exe",
     "whistle.cact",
+    "needle3-es.cact",
     "piper_windows_amd64.zip",
     "es_MX-ald-x_low.onnx",
     "es_MX-ald-x_low.onnx.json",

@@ -67,7 +67,7 @@ pub fn payload_present(exe_dir: &Path, require: bool) -> Outcome {
     } else {
         &[]
     };
-    let missing: Vec<&str> = ["needle.exe", "whistle.cact"]
+    let missing: Vec<&str> = ["needle.exe", "whistle.cact", "needle3-es.cact"]
         .into_iter()
         .chain(piper.iter().copied())
         .filter(|name| !exe_dir.join(name).is_file())
@@ -180,6 +180,7 @@ mod tests {
         ));
         std::fs::write(dir.path().join("needle.exe"), b"x").unwrap();
         std::fs::write(dir.path().join("whistle.cact"), b"x").unwrap();
+        std::fs::write(dir.path().join("needle3-es.cact"), b"x").unwrap();
         if cfg!(target_arch = "x86_64") {
             assert!(matches!(
                 payload_present(dir.path(), true),

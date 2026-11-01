@@ -116,6 +116,13 @@ impl SpokenTurn {
         on_text: &mut dyn FnMut(&str) -> bool,
         cancel: &Arc<AtomicBool>,
     ) -> Result<(), String> {
+        // A simple instruction needs no reply, so nothing is spoken.
+        if self.session.tool_runner().route_command(text) {
+            self.session
+                .with_conversation(|c| c.record_routed_command(text));
+            self.session.mirror_conversation();
+            return Ok(());
+        }
         let result = self.turn(text, on_text, cancel);
         self.session.mirror_conversation();
         match result {

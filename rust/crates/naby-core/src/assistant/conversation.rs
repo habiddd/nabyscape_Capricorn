@@ -228,6 +228,12 @@ impl Conversation {
         }
     }
 
+    /// Record an instruction the router ran without the chat model.
+    pub fn record_routed_command(&mut self, text: &str) {
+        self.record(Role::User, text);
+        self.record(Role::Assistant, "\u{2713}");
+    }
+
     /// Record the outcome of a voice-triggered action as bounded plain text, never as an orphan
     /// protocol tool result.
     pub fn record_voice_outcome(&mut self, generation: u64, call: &Call, result: &str) {

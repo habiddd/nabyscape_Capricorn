@@ -179,6 +179,12 @@ pub trait VoiceHost: Send + Sync {
     /// Makes `runtime` the active one, installing it first when it is missing; progress is
     /// reported through [`SpeechPanel`] and the runtime switches once the install succeeded.
     fn use_whistle(&self, runtime: super::engine::WhistleRuntime);
+    /// Whether Needle's files for quick commands are in place.
+    fn quick_commands_installed(&self) -> bool {
+        false
+    }
+    /// Turns quick commands on (installing Needle first when it is missing) or off.
+    fn use_quick_commands(&self, _on: bool) {}
     /// Short status of the built-in Piper voice `voice` ("Ready", "Not installed", ...).
     fn piper_status(&self, voice: &str) -> String;
     /// Whether Piper and `voice` are unpacked and verified.
