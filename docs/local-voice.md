@@ -1,6 +1,22 @@
 # Naby voice · local speech setup
 
-Naby voice is a separate optional widget. Turn it on in **Settings → Widgets & tools**, or choose **Voice mode** in the chat header. It shares conversation, Stop and selected screen context with Naby chat. Naby has no built-in action or computer-control tools. Opening Voice mode never starts the microphone.
+Naby voice is a separate optional widget. Turn it on in **Settings → Widgets & tools**, or choose **Voice mode** in the chat header. It shares conversation, Stop and selected screen context with Naby chat. Beyond the optional quick commands below, Naby has no built-in action or computer-control tools. Opening Voice mode never starts the microphone.
+
+## Built in since 3.0: Whistle and Piper
+
+The installer ships **Whistle** for listening and **Piper** for speaking, so a local conversation needs no download, only a chat model. Both run on this PC and use memory only while they work.
+
+Whistle runs with `needle.exe` (recommended) or with Python: **Settings → Voice → Models → Install with pip**. The `pip` option needs Python 3, keeps everything in its own virtual environment under `local-speech\whistle-pip`, and is the only one that shows your words live while you speak (about 67 MB more during a sentence). If the Python that created the environment is removed, the page says so and **Install** rebuilds it.
+
+With the wake word on and Whistle installed, Whistle listens for "Hey Naby" or "Oye Naby" and the microphone stays open. Otherwise Windows speech recognition listens.
+
+## Quick commands: instructions with no reply
+
+Turn them on in **Settings → Voice → Models → Quick commands**. They are off by default.
+
+Short instructions run with no reply and no chat model, in chat and in voice: pause, play, next or previous song, set the volume to a number, mute, start a timer in minutes, open a page. Anything else goes to your chat model as usual, and so does anything in doubt.
+
+Cactus Needle 3, fine-tuned for Spanish (`needle3-es.cact`), picks the action, and your words must back it, so "no pauses la música" does nothing. A phrase that cannot be a command never starts the model. One that can takes about a second and 134 MB, released right after. "Sube el volumen" without a number goes to chat.
 
 ## Choose your voice path
 

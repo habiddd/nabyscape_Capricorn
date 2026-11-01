@@ -1,4 +1,4 @@
-# Naby AI · local 2.20.0 candidate
+# Naby AI
 
 Naby provides text chat, voice, a reactive character and context from a window or display you choose. AI is optional; island widgets continue working without a provider. No key, subscription or model weights are bundled.
 
@@ -65,6 +65,10 @@ The listener evaluates a small local grammar; it does not upload or save wake au
 The island character and tray tooltip indicate microphone listening, and Voice shows the current wake status. **Options → Pause/Resume wake word** and the tray offer quick controls. End conversation can re-arm wake listening after voice closes and a short cooldown; the voice privacy label explains this. **Stop all microphones**, Stop/Escape in chat, Hide, quitting, screen lock and sleep pause both listeners. After lock or sleep, resume manually. Saving provider configuration also pauses wake listening. Default-device or Windows recognition failures require checking settings and explicitly resuming; there is no retry loop that repeatedly opens the microphone. Wake and voice startup/teardown are serialized to avoid concurrent capture or stale activation after Stop.
 
 Wake uses Microsoft's [System.Speech recognition API](https://learn.microsoft.com/en-us/dotnet/api/system.speech.recognition.speechrecognitionengine) and its [MIT-licensed package](https://www.nuget.org/packages/System.Speech/10.0.13). Enabled recognition uses additional Windows resources; no hardware recognition or resource benchmarks were run for this candidate.
+
+## Quick commands
+
+Optional and off by default since 3.0: short instructions such as "pausa la música" run on this PC with no reply and no chat model, in chat and in voice. They are limited to music, volume, mute, timer and opening an enabled page; the chat model still has only the navigation tools below. See [Local speech and quick commands](local-voice.md).
 
 ## Navigate widget pages with AI tools
 

@@ -144,6 +144,20 @@ Uninstall through **Windows Settings → Apps → Installed apps → NabyScape**
 
 </details>
 
+## Build the Rust app (3.0)
+
+The app lives in `rust/`. See [rust/README.md](../rust/README.md).
+
+```powershell
+cd rust
+cargo test --workspace
+cargo build -p naby-win --bin nabyscape
+# Setup and Portable packages; needs the MSVC ARM64 build tools for the ARM64 step.
+./build-release.ps1 -Tag v3.0.0
+```
+
+The sections below describe the previous WPF/.NET build.
+
 ## Build from source
 
 You need **Windows 11 x64 or ARM64** and **.NET SDK 10**. Publish for `win-x64` or `win-arm64` as appropriate. Do not run an ARM64 executable on an x64 host.

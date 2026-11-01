@@ -1,10 +1,10 @@
 <p align="center"><a href="https://nabyscape.vercel.app/"><img src="Assets/showcase/readme-web3-cover.jpg" width="100%" alt="NabyScape: a black and chrome Naby companion, lime accents and a compact Windows dock."></a></p>
 
-<p align="center"><a href="https://github.com/BillyNabil/nabyscape/releases/latest"><strong>Download for Windows ↗</strong></a> &nbsp; · &nbsp; <a href="https://nabyscape.vercel.app/">Website</a> &nbsp; · &nbsp; <a href="docs/guide.md">User guide</a> &nbsp; · &nbsp; <a href="LICENSE">MIT licensed</a></p>
+<p align="center"><a href="https://github.com/habiddd/nabyscape_Capricorn/releases/latest"><strong>Download for Windows ↗</strong></a> &nbsp; · &nbsp; <a href="https://nabyscape.vercel.app/">Website</a> &nbsp; · &nbsp; <a href="docs/guide.md">User guide</a> &nbsp; · &nbsp; <a href="LICENSE">MIT licensed</a></p>
 
 NabyScape brings music controls, everyday tools and an optional AI companion into one configurable island for Windows.
 
-**Current release: [2.24.0](https://github.com/BillyNabil/nabyscape/releases/tag/v2.24.0).** Windows 10/11 packages are available for x64 and ARM64. Explore the [live website](https://nabyscape.vercel.app/), [release notes](docs/releases/v2.24.0.md) or [website source](website/).
+**Current release: [3.0.0](https://github.com/habiddd/nabyscape_Capricorn/releases/tag/v3.0.0).** A native Rust build for Windows 10/11 x64, with speech and quick commands built in. Read the [release notes](docs/releases/v3.0.0.md), or explore the [live website](https://nabyscape.vercel.app/) and [website source](website/).
 
 ## Your music, within reach
 
@@ -31,7 +31,8 @@ Clock, battery and system panels are available where Windows and hardware suppor
 Connect an API provider, a local compatible server or your own **Hermes Agent**. Naby handles chat, attachments and optional voice; Hermes manages its agent tools and permissions. API access is not bundled.
 
 - **Chat:** formatted replies, image paste, image/video/PDF attachments and compatible image replies. Capabilities depend on the provider/model.
-- **Voice:** realtime providers, automatic local speech packs, external ASR/TTS services or imported model files. Hardware suggestions help choose a pack; install it explicitly, then use it.
+- **Voice:** Whistle and Piper built in, realtime providers, automatic local speech packs, external ASR/TTS services or imported model files. Hardware suggestions help choose a pack; install it explicitly, then use it.
+- **Quick commands:** optional. Short instructions such as "pausa la música" run on your PC with no reply and no chat model.
 - **Hands-free:** optional local wake-word detection. End conversation resumes wake listening when enabled; explicit Stop pauses it.
 - **Context:** choose a window or display to share. Screen and microphone access are explicit choices.
 - **Connections:** save a provider, load or paste a model ID, and check the connection. API keys stay in Windows Credential Manager.
@@ -52,18 +53,15 @@ The dock runs in one WPF application process, with lazy preview construction and
 
 ## Install & update
 
-[**Open the latest published release →**](https://github.com/BillyNabil/nabyscape/releases/latest)
+[**Open the latest published release →**](https://github.com/habiddd/nabyscape_Capricorn/releases/latest)
 
-| Your PC | Installer for Windows 10 / 11 | Portable |
-| --- | --- | --- |
-| Intel or AMD 64-bit | [Download x64 Setup](https://github.com/BillyNabil/nabyscape/releases/download/v2.24.0/NabyScape-win-x64-Setup.exe) | [x64 ZIP](https://github.com/BillyNabil/nabyscape/releases/download/v2.24.0/NabyScape-win-x64-Portable.zip) |
-| Windows on ARM | [Download ARM64 Setup](https://github.com/BillyNabil/nabyscape/releases/download/v2.24.0/NabyScape-win-arm64-Setup.exe) | [ARM64 ZIP](https://github.com/BillyNabil/nabyscape/releases/download/v2.24.0/NabyScape-win-arm64-Portable.zip) |
+| Your PC | Installer for Windows 10 / 11 |
+| --- | --- |
+| Intel or AMD 64-bit | [Download x64 Setup](https://github.com/habiddd/nabyscape_Capricorn/releases/download/v3.0.0/NabyScape-win-x64-Setup.exe) (126 MB) |
 
-The same architecture-specific package targets Windows 10 build 19041 or later and Windows 11; no separate Windows 10 installer is needed. Windows 10 22H2 is recommended over older Windows 10 builds. OS/.NET support follows Microsoft's lifecycle. Windows 11 x64 is locally exercised; physical Windows 10 and native ARM64 execution have not been validated. Native local speech compatibility is separate: managed speech packs require an x64 process with AVX2/FMA; ARM64 can use compatible external speech servers or providers.
+The installer contains everything, including the speech models; nothing else downloads. 3.0.0 has no ARM64 package. The installer is unsigned and installs for the current Windows user, so Windows may warn you. [SHA-256 checksums](https://github.com/habiddd/nabyscape_Capricorn/releases/download/v3.0.0/SHA256SUMS).
 
-New in 2.24: WPF hover/character optimizations, removal of Satellite/Activities, and automatic waveform fallback for live lyrics. The complete recommended preference snapshot, managed-model uninstaller, dot navigation, microphone selection/testing and installer folder chooser remain available. New installations default to `%LOCALAPPDATA%\Programs\NabyScape`. Existing preferences are kept.
-
-The .NET runtime is bundled. Installers are unsigned and install for the current Windows user. [SHA-256 checksums](https://github.com/BillyNabil/nabyscape/releases/download/v2.24.0/SHA256SUMS) · [Dependency notices](https://github.com/BillyNabil/nabyscape/releases/download/v2.24.0/NabyScape-Notices.zip).
+New in 3.0: a native Rust app instead of WPF/.NET, Whistle and Piper voice on this PC, a bilingual wake word, and optional quick commands that run short instructions in Spanish or English without a chat model. [Local speech and quick commands](docs/local-voice.md). Existing preferences are kept.
 
 New installs use the Daily Notch appearance. Upgrades preserve preferences and content. The recommended setup follows the selected daily preferences, including live lyrics, clipboard history, download alerts, startup and Naby. Automatic update checks are on; update downloads follow the snapshot and are off by default. Installation/restart remains explicit. Each feature has its own control. Quit from the tray to exit.
 
@@ -77,7 +75,7 @@ Notes, tasks, settings and shelf references stay in your Windows profile. Turnin
 
 [Watch the 29-second app tour →](https://github.com/BillyNabil/nabyscape/releases/download/v2.10.0/NabyScape-demo.mp4) · Silent · v2.10 recording
 
-The film and Focus/Notes captures document the actual **v2.10** app. The dock-state scene is a web illustration; the Settings image is a fresh **2.21.1** capture. The chrome Naby is original brand artwork. [Capture provenance](docs/showcase.md) · [Current verification](docs/releases/v2.24.0-verification.md) · [Visual sources](docs/readme-web3-refresh.md).
+The film and Focus/Notes captures document the actual **v2.10** app. The dock-state scene is a web illustration; the Settings image is a fresh **2.21.1** capture. The chrome Naby is original brand artwork. [Capture provenance](docs/showcase.md) · [Last verification report](docs/releases/v2.24.0-verification.md) · [Visual sources](docs/readme-web3-refresh.md).
 
 ## Build & verify
 
